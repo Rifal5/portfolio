@@ -7,7 +7,7 @@ const projects = [
     tag: 'Thermodynamics',
     description: 'Interactive steam power cycle simulator. Adjust boiler pressure, condenser pressure, and superheat temperature to see live efficiency, work output, and P-V diagrams.',
     tech: ['SVG', 'Canvas', 'Steam Tables'],
-    href: '/src/projects/rankine/index.html',
+    href: `${import.meta.env.BASE_URL}src/projects/rankine/index.html`,
     color: '#f59e0b',
   },
   {
@@ -16,7 +16,7 @@ const projects = [
     tag: 'Emergent Behavior',
     description: 'A 2D canvas simulation of autonomous agents with flocking, food-seeking, and reproduction. Watch complex group behavior emerge from simple per-creature rules.',
     tech: ['Canvas 2D', 'Boids', 'Energy System'],
-    href: '/src/projects/creatures/index.html',
+    href: `${import.meta.env.BASE_URL}src/projects/creatures/index.html`,
     color: '#22c55e',
   },
   {
@@ -25,7 +25,7 @@ const projects = [
     tag: 'Inverse Kinematics',
     description: 'Drive a 4-DOF articulated arm with WASD and pick up colored boxes with the spacebar. Analytic IK with real joint types and limits — revolute yaw base, pitch hinges, prismatic gripper.',
     tech: ['Three.js', 'Analytic IK', 'Joint limits'],
-    href: '/src/projects/robot-arm/index.html',
+    href: `${import.meta.env.BASE_URL}src/projects/robot-arm/index.html`,
     color: '#6366f1',
   },
 ]

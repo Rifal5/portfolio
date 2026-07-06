@@ -4,7 +4,10 @@ import { resolve } from 'path'
 
 export default defineConfig({
   plugins: [tailwindcss()],
-  base: './',
+  // GitHub Pages serves this as a project site at /portfolio/, not the domain
+  // root — every absolute-rooted reference (asset hrefs, in-app navigation)
+  // needs this prefix. import.meta.env.BASE_URL exposes it to JS.
+  base: '/portfolio/',
   build: {
     rollupOptions: {
       input: {

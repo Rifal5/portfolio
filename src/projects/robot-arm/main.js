@@ -9,7 +9,7 @@ document.querySelector('#app').innerHTML = `
 <div style="display:flex;flex-direction:column;height:100vh;">
   <div style="display:flex;align-items:center;justify-content:space-between;padding:0.6rem 1rem;flex-shrink:0;border-bottom:1px solid #1e1e2e;">
     <div style="display:flex;align-items:center;gap:1rem;">
-      <a href="/index.html" style="color:#64748b;text-decoration:none;font-size:0.875rem;">← Simulations</a>
+      <a href="${import.meta.env.BASE_URL}index.html" style="color:#64748b;text-decoration:none;font-size:0.875rem;">← Simulations</a>
       <div style="display:flex;align-items:center;gap:0.75rem;">
         <h1 style="font-size:1.05rem;font-weight:700;">Robot Arm — Pick &amp; Place</h1>
         <span style="font-size:0.7rem;font-weight:500;color:#6366f1;background:#6366f118;padding:0.15rem 0.6rem;border-radius:999px;">4-DOF · Analytic IK · Joint limits</span>

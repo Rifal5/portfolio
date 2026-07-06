@@ -43,7 +43,7 @@ document.querySelector('#app').innerHTML = `
           Each creature runs a tiny neural net — random sensor inputs pass through weight matrices to produce movement. Survivors reproduce and mutate. Watch behavior improve across generations.
         </p>
         <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-          <span style="font-size:0.75rem;color:#64748b;background:#1e1e2e;padding:0.15rem 0.6rem;border-radius:0.35rem;">8→8→3 Network</span>
+          <span style="font-size:0.75rem;color:#64748b;background:#1e1e2e;padding:0.15rem 0.6rem;border-radius:0.35rem;">Retina Vision</span>
           <span style="font-size:0.75rem;color:#64748b;background:#1e1e2e;padding:0.15rem 0.6rem;border-radius:0.35rem;">Mutation</span>
           <span style="font-size:0.75rem;color:#64748b;background:#1e1e2e;padding:0.15rem 0.6rem;border-radius:0.35rem;">Save Weights</span>
         </div>

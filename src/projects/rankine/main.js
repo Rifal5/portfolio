@@ -36,7 +36,7 @@ document.querySelector('#app').innerHTML = `
 <div style="display:flex;flex-direction:column;height:100vh;background:#0a0a0f;">
   <div style="display:flex;align-items:center;justify-content:space-between;padding:0.6rem 1rem;border-bottom:1px solid #1e1e2e;flex-shrink:0;">
     <div style="display:flex;align-items:center;gap:1rem;">
-      <a href="/index.html" style="color:#64748b;text-decoration:none;font-size:0.875rem;">← Simulations</a>
+      <a href="${import.meta.env.BASE_URL}index.html" style="color:#64748b;text-decoration:none;font-size:0.875rem;">← Simulations</a>
       <div style="display:flex;align-items:center;gap:0.6rem;">
         <h1 style="font-size:1rem;font-weight:700;color:#e2e8f0;">Rankine Cycle Builder</h1>
         <span style="font-size:0.7rem;color:#f59e0b;background:#f59e0b18;padding:0.1rem 0.5rem;border-radius:999px;">Thermodynamics</span>
