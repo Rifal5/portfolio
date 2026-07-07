@@ -28,6 +28,15 @@ const projects = [
     href: `${import.meta.env.BASE_URL}src/projects/robot-arm/index.html`,
     color: '#6366f1',
   },
+  {
+    id: 'pendulum',
+    title: 'Self-Righting Pendulum',
+    tag: 'Control Theory',
+    description: 'A cart-pole balancer that swings itself upright from hanging using energy-shaping control, then hands off to an LQR regulator. Shove it and watch it recover on its own.',
+    tech: ['LQR', 'Energy Swing-Up', 'Canvas 2D'],
+    href: `${import.meta.env.BASE_URL}src/projects/pendulum/index.html`,
+    color: '#06b6d4',
+  },
 ]
 
 document.querySelector('#app').innerHTML = `
@@ -36,7 +45,7 @@ document.querySelector('#app').innerHTML = `
     <p style="color:var(--accent);font-size:0.875rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:0.75rem;">Portfolio</p>
     <h1 style="font-size:2.5rem;font-weight:700;line-height:1.15;margin-bottom:1rem;">Interactive Simulations</h1>
     <p style="color:var(--muted);font-size:1.1rem;max-width:480px;line-height:1.6;">
-      Three browser-based technical demos — physics, AI behavior, and 3D visualization.
+      Four browser-based technical demos — physics, AI behavior, control theory, and 3D visualization.
     </p>
   </header>
 

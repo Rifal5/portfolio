@@ -17,6 +17,7 @@ export default defineConfig({
         'creatures-boids': resolve(__dirname, 'src/projects/creatures/boids.html'),
         'creatures-neural': resolve(__dirname, 'src/projects/creatures/neural.html'),
         'robot-arm': resolve(__dirname, 'src/projects/robot-arm/index.html'),
+        pendulum: resolve(__dirname, 'src/projects/pendulum/index.html'),
       },
     },
   },
