@@ -1,15 +1,45 @@
-import { PARAMS } from './physics.js'
+// Canvas renderer for the cart-pole. Draws the track, the cart, and the pole as
+// a chain of links (one link for the single pole, two for the double) via the
+// plant's renderLinks(state). In realistic mode it also draws a faint "ghost"
+// pole from the estimator's reconstructed state, so you can literally see the
+// observer's error — the ghost lags/wobbles slightly behind the true pole.
 
 const BG = '#0a0a0f'
 
-// World-to-pixel scale: fit the track (±trackHalfWidth, plus margin for the
-// cart and a fully horizontal pole) inside the canvas width.
-function scaleFor(W, p) {
-  const worldSpan = p.trackHalfWidth * 2 + 2 * p.poleHalfLength * 2 + 1.2
+function scaleFor(W, plant) {
+  const p = plant.PARAMS
+  const worldSpan = p.trackHalfWidth * 2 + 2 * plant.meta.reach + 1.2
   return W / worldSpan
 }
 
-export function render(canvas, state, opts = {}) {
+function linkUpright(theta) {
+  let a = (theta + Math.PI) % (2 * Math.PI)
+  if (a < 0) a += 2 * Math.PI
+  return Math.abs(a - Math.PI) < 0.25
+}
+
+// Draw a link chain. `ghost` renders it in a flat grey (the estimator ghost);
+// otherwise each link is coloured green/amber by its OWN uprightness.
+function drawChain(ctx, cx, cy, links, scale, { width, alpha, ghost }) {
+  ctx.globalAlpha = alpha
+  ctx.lineCap = 'round'
+  let x = cx, y = cy
+  for (const lk of links) {
+    const tipX = x + Math.sin(lk.theta) * lk.len * scale
+    const tipY = y - Math.cos(lk.theta) * lk.len * scale
+    const up = linkUpright(lk.theta)
+    ctx.strokeStyle = ghost ? '#64748b' : (up ? '#22c55e' : '#f59e0b')
+    ctx.lineWidth = width
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(tipX, tipY); ctx.stroke()
+    ctx.beginPath(); ctx.arc(tipX, tipY, width * 0.85, 0, Math.PI * 2)
+    ctx.fillStyle = ghost ? '#64748b' : (up ? '#4ade80' : '#fbbf24')
+    ctx.fill()
+    x = tipX; y = tipY
+  }
+  ctx.globalAlpha = 1
+}
+
+export function render(canvas, plant, state, opts = {}) {
   const dpr = window.devicePixelRatio || 1
   const rect = canvas.getBoundingClientRect()
   canvas.width = rect.width * dpr
@@ -21,96 +51,55 @@ export function render(canvas, state, opts = {}) {
   ctx.fillStyle = BG
   ctx.fillRect(0, 0, W, H)
 
-  const p = opts.params || PARAMS
-  const scale = scaleFor(W, p)
+  const p = plant.PARAMS
+  const scale = scaleFor(W, plant)
   const originX = W / 2
   const trackY = H * 0.62
-
   const wx = x => originX + x * scale
-  const wy = y => trackY - y * scale
 
-  // Track rail
-  ctx.strokeStyle = '#1e293b'
-  ctx.lineWidth = 4
-  ctx.lineCap = 'round'
-  ctx.beginPath()
-  ctx.moveTo(wx(-p.trackHalfWidth - 0.35), trackY)
-  ctx.lineTo(wx(p.trackHalfWidth + 0.35), trackY)
-  ctx.stroke()
-  // end stops
-  ctx.strokeStyle = '#334155'
-  ctx.lineWidth = 6
+  // Track rail + end stops + centre mark
+  ctx.strokeStyle = '#1e293b'; ctx.lineWidth = 4; ctx.lineCap = 'round'
+  ctx.beginPath(); ctx.moveTo(wx(-p.trackHalfWidth - 0.35), trackY); ctx.lineTo(wx(p.trackHalfWidth + 0.35), trackY); ctx.stroke()
+  ctx.strokeStyle = '#334155'; ctx.lineWidth = 6
   for (const ex of [-p.trackHalfWidth, p.trackHalfWidth]) {
-    ctx.beginPath()
-    ctx.moveTo(wx(ex), trackY - 14)
-    ctx.lineTo(wx(ex), trackY + 14)
-    ctx.stroke()
+    ctx.beginPath(); ctx.moveTo(wx(ex), trackY - 14); ctx.lineTo(wx(ex), trackY + 14); ctx.stroke()
   }
-  // center mark
-  ctx.strokeStyle = '#334155aa'
-  ctx.setLineDash([3, 4])
+  ctx.strokeStyle = '#334155aa'; ctx.setLineDash([3, 4])
   ctx.beginPath(); ctx.moveTo(wx(0), trackY - 20); ctx.lineTo(wx(0), trackY + 20); ctx.stroke()
   ctx.setLineDash([])
 
   const cartW = 0.42 * scale, cartH = 0.26 * scale
   const cx = wx(state.x), cy = trackY
+  const pivotY = cy - cartH * 0.1
 
-  // Pole (drawn under the cart cap so the pivot reads cleanly)
-  const poleLen = p.poleHalfLength * 2 * scale
-  const tipX = cx + Math.sin(state.theta) * poleLen
-  const tipY = cy - Math.cos(state.theta) * poleLen
-  const upright = Math.abs(((state.theta + Math.PI) % (2 * Math.PI)) - Math.PI) < 0.25
-  ctx.strokeStyle = upright ? '#22c55e' : '#f59e0b'
-  ctx.lineWidth = 9
-  ctx.lineCap = 'round'
-  ctx.beginPath()
-  ctx.moveTo(cx, cy - cartH * 0.1)
-  ctx.lineTo(tipX, tipY)
-  ctx.stroke()
-  // bob at the tip
-  ctx.beginPath()
-  ctx.arc(tipX, tipY, 8, 0, Math.PI * 2)
-  ctx.fillStyle = upright ? '#4ade80' : '#fbbf24'
-  ctx.fill()
+  // Estimator ghost (behind the true pole), if provided.
+  if (opts.estimate) {
+    drawChain(ctx, wx(opts.estimate.x), pivotY, plant.renderLinks(opts.estimate), scale,
+      { width: 7, alpha: 0.35, ghost: true })
+  }
 
-  // Cart body
-  ctx.fillStyle = '#12121a'
-  ctx.strokeStyle = '#6366f1'
-  ctx.lineWidth = 1.5
+  // True pole chain — each link coloured by its own uprightness.
+  drawChain(ctx, cx, pivotY, plant.renderLinks(state), scale, { width: 9, alpha: 1 })
+
+  // Cart body + wheels + pivot
+  ctx.fillStyle = '#12121a'; ctx.strokeStyle = '#6366f1'; ctx.lineWidth = 1.5
   roundRect(ctx, cx - cartW / 2, cy - cartH / 2, cartW, cartH, 6)
   ctx.fill(); ctx.stroke()
-  // wheels
   ctx.fillStyle = '#334155'
   for (const dx of [-cartW * 0.3, cartW * 0.3]) {
-    ctx.beginPath()
-    ctx.arc(cx + dx, cy + cartH / 2, 5, 0, Math.PI * 2)
-    ctx.fill()
+    ctx.beginPath(); ctx.arc(cx + dx, cy + cartH / 2, 5, 0, Math.PI * 2); ctx.fill()
   }
-  // pivot dot
-  ctx.beginPath()
-  ctx.arc(cx, cy - cartH * 0.1, 4, 0, Math.PI * 2)
-  ctx.fillStyle = '#e2e8f0'
-  ctx.fill()
+  ctx.beginPath(); ctx.arc(cx, pivotY, 4, 0, Math.PI * 2); ctx.fillStyle = '#e2e8f0'; ctx.fill()
 
-  // Applied-force arrow on the cart
+  // Applied-force arrow
   if (opts.force && Math.abs(opts.force) > 0.15) {
     const dir = Math.sign(opts.force)
     const len = Math.min(1, Math.abs(opts.force) / p.forceMax) * 46
     const ax = cx + dir * (cartW / 2 + 6)
-    ctx.strokeStyle = '#38bdf8'
-    ctx.fillStyle = '#38bdf8'
-    ctx.lineWidth = 3
-    ctx.beginPath()
-    ctx.moveTo(ax, cy)
-    ctx.lineTo(ax + dir * len, cy)
-    ctx.stroke()
-    ctx.beginPath()
+    ctx.strokeStyle = '#38bdf8'; ctx.fillStyle = '#38bdf8'; ctx.lineWidth = 3
+    ctx.beginPath(); ctx.moveTo(ax, cy); ctx.lineTo(ax + dir * len, cy); ctx.stroke()
     const hx = ax + dir * len
-    ctx.moveTo(hx, cy)
-    ctx.lineTo(hx - dir * 7, cy - 5)
-    ctx.lineTo(hx - dir * 7, cy + 5)
-    ctx.closePath()
-    ctx.fill()
+    ctx.beginPath(); ctx.moveTo(hx, cy); ctx.lineTo(hx - dir * 7, cy - 5); ctx.lineTo(hx - dir * 7, cy + 5); ctx.closePath(); ctx.fill()
   }
 
   ctx.restore()

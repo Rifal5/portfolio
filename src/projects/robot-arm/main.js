@@ -1,6 +1,8 @@
 import '../../styles/main.css'
 import { solveIK, JOINTS, L } from './arm.js'
 import { RobotScene } from './scene.js'
+import { makeJointProfiler } from './motion.js'
+import { makeAccumulator } from '../../lib/control/integrate.js'
 
 const BOX_COLORS = [0xef4444, 0x22c55e, 0x3b82f6]
 const COLOR_NAMES = { 0xef4444: 'Red', 0x22c55e: 'Green', 0x3b82f6: 'Blue' }
@@ -173,9 +175,9 @@ function dipActionFire() {
 const jointPanel = document.getElementById('joint-panel')
 const wrap180 = a => ((a + 180) % 360 + 360) % 360 - 180
 
-function renderJoints(ik) {
+function renderJoints(ik, pose) {
   jointPanel.innerHTML = JOINTS.map(j => {
-    const raw = ik.angles[j.key]
+    const raw = (pose || ik.angles)[j.key]
     const a = j.continuous ? wrap180(raw) : raw
     const atLimit = !j.continuous && (ik.clamped[j.key] || a <= j.min + 0.5 || a >= j.max - 0.5)
     const frac = (a - j.min) / (j.max - j.min)
@@ -204,6 +206,19 @@ const R_MIN = 0.85, R_MAX = L.upper + L.fore - 0.05
 let lastT = performance.now()
 let frame = 0
 
+// Joint-space motion layer: the IK gives a target pose; the profiler drives each
+// joint there under real velocity/acceleration limits (no teleporting). Physics
+// on a fixed substep so motion is identical regardless of frame rate.
+const PROFILE_STEP = 1 / 240
+const profiler = makeJointProfiler()
+const motionClock = makeAccumulator(PROFILE_STEP)
+// Seed the profiler at the home pose so its output is valid on the very first
+// frame (before the accumulator has ticked).
+{
+  const yr0 = cmd.yawDeg * Math.PI / 180
+  profiler.reset(solveIK({ x: cmd.r * Math.cos(yr0), y: cmd.y, z: cmd.r * Math.sin(yr0) }, cmd.yawDeg).angles)
+}
+
 function loop(now) {
   const dt = Math.min(0.05, (now - lastT) / 1000)
   lastT = now
@@ -221,11 +236,15 @@ function loop(now) {
   const target = { x: cmd.r * Math.cos(yawR), y: cmd.y, z: cmd.r * Math.sin(yawR) }
 
   const ik = solveIK(target, cmd.yawDeg)
-  scene.setPose(ik.angles)
+  // Slew the joints toward the IK solution under velocity/accel limits.
+  motionClock.advance(dt, h => profiler.step(ik.angles, h))
+  scene.setPose(profiler.pose)
   scene.setTarget(target)
   scene.setGripper(holding ? 0 : (spaceHeld ? 0.4 : 1))
 
-  // Fire the grab/release once, at the bottom of the dip
+  // Fire the grab/release at the bottom of the dip. The profiler tracks the slow
+  // (~1 s) dip closely, so the command height is a faithful proxy for the arm's
+  // actual height here.
   if (spaceHeld && dipAction === 'pending' && cmd.y < GRAB_Y + 0.06) {
     dipActionFire()
     dipAction = 'done'
@@ -236,7 +255,7 @@ function loop(now) {
     holding.mesh.position.set(g.x, Math.max(0.18, g.y - 0.05), g.z)
   }
 
-  if (frame % 4 === 0) renderJoints(ik)
+  if (frame % 4 === 0) renderJoints(ik, profiler.pose)
   frame++
 
   scene.render()
@@ -251,6 +270,8 @@ window.__armDebug = {
   get holding() { return holding },
   get placed() { return placedCount },
   get spaceHeld() { return spaceHeld },
+  get pose() { return profiler.pose },
+  get atTarget() { return profiler.atTarget },
   scene, solveIK,
 }
 
