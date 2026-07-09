@@ -4,6 +4,7 @@ import { CONTROLLERS } from './controllers/index.js'
 import { makeSingleSwingUp } from './controllers/energy.js'
 import { makeSim, SUBSTEP } from './sim.js'
 import { render } from './render.js'
+import { renderNet } from './net-view.js'
 
 // Per-plant swing-up laws (the double's is added in Phase 5).
 const SWINGUPS = { single: makeSingleSwingUp }
@@ -56,9 +57,13 @@ document.querySelector('#app').innerHTML = `
           <button id="shove-r" class="btn btn-ghost" style="flex:1;font-size:0.75rem;padding:0.4rem;">Shove →</button>
         </div>
         <button id="reset" class="btn btn-ghost" style="margin-top:0.5rem;width:100%;font-size:0.75rem;padding:0.4rem;">↺ Drop from hanging</button>
+        <button id="motor" class="btn btn-ghost" style="margin-top:0.4rem;width:100%;font-size:0.75rem;padding:0.4rem;">⏻ Motor: On</button>
+        <div id="trip-banner" style="display:none;margin-top:0.5rem;font-size:0.68rem;color:#ef4444;background:#ef444414;border:1px solid #ef444433;border-radius:6px;padding:0.4rem 0.5rem;line-height:1.4;"></div>
       </div>
       <div id="neural-panel" style="padding:0.8rem;border-bottom:1px solid #1e1e2e;display:none;">
-        <p style="font-size:0.8rem;font-weight:600;color:#e2e8f0;margin-bottom:0.5rem;">Evolve a controller</p>
+        <p style="font-size:0.8rem;font-weight:600;color:#e2e8f0;margin-bottom:0.4rem;">Network</p>
+        <canvas id="net-canvas" style="width:100%;height:150px;display:block;background:#0d0d14;border:1px solid #1e1e2e;border-radius:6px;"></canvas>
+        <p style="font-size:0.62rem;color:#475569;margin:0.35rem 0 0.6rem;line-height:1.4;">Nodes = live activations (green +, red −); edges = weights (cyan +, red −). Inputs left, motor force right.</p>
         <button id="retrain" class="btn btn-ghost" style="width:100%;font-size:0.75rem;padding:0.4rem;">⟳ Retrain from scratch</button>
         <p id="train-status" style="font-size:0.68rem;color:#64748b;margin-top:0.5rem;line-height:1.5;">Ships with a pre-trained champion. Retrain to watch neuroevolution climb, then it takes over live.</p>
       </div>
@@ -76,6 +81,7 @@ document.querySelector('#app').innerHTML = `
 `
 
 const canvas = document.getElementById('pend-canvas')
+const netCanvas = document.getElementById('net-canvas')
 
 // --- build selectors ---
 const selPlant = document.getElementById('sel-plant')
@@ -116,30 +122,40 @@ function onPlantChange() {
 // --- sim wiring ---
 let plant, sim
 function buildController() {
+  const c = CONTROLLERS[state.ctrlKey]
   if (plant.meta.name === 'double') {
-    // Stabilize-only: hold the selected equilibrium (started near it). Live
-    // swing-up transitions between inverted equilibria are the research frontier.
-    return CONTROLLERS.lqr.make(plant, { targetEq: state.targetEq, enter: () => true, exit: () => false })
+    // LQR stabilizes the selected equilibrium (started near it). The neural
+    // balancer holds both-up only. Either way, no global swing-up (out of scope).
+    if (state.ctrlKey === 'lqr') return c.make(plant, { targetEq: state.targetEq, enter: () => true, exit: () => false })
+    return c.make(plant, {})
   }
   const swing = SWINGUPS[state.plantKey]
-  return CONTROLLERS[state.ctrlKey].make(plant, swing ? { swingUp: swing(plant) } : {})
+  return c.make(plant, swing ? { swingUp: swing(plant) } : {})
 }
 // Where the pole starts: the single drops from hanging (to show swing-up); the
-// double starts near its target equilibrium (so the LQR can hold it — global
-// swing-up of the double is out of scope).
+// double starts near its target equilibrium so it can be held (neural balances
+// both-up only). Global swing-up of the double is out of scope.
 function startState() {
+  if (state.ctrlKey === 'manual') return plant.initialState() // start at rest; you drive
   if (plant.meta.name !== 'double') return plant.initialState()
-  const eq = plant.fromVec(plant.meta.equilibria[state.targetEq].x)
+  const idx = state.ctrlKey === 'neural' ? 0 : state.targetEq // neural = both-up
+  const eq = plant.fromVec(plant.meta.equilibria[idx].x)
   return { ...eq, theta1: eq.theta1 + 0.1, theta2: eq.theta2 - 0.1, x: 0 }
 }
 let currentController
 function rebuild() {
   plant = PLANTS[state.plantKey]
   currentController = buildController()
-  sim = makeSim({ plant, controller: currentController, realistic: state.realistic })
+  sim = makeSim({ plant, controller: currentController, realistic: state.realistic, autoTrip: state.ctrlKey !== 'manual' })
   sim.reset(startState())
   document.getElementById('neural-panel').style.display = state.ctrlKey === 'neural' ? '' : 'none'
+  // Neural on the double only balances both-up, so the target selector is fixed there.
+  const targetFixed = state.plantKey === 'double' && state.ctrlKey === 'neural'
+  const selT = document.getElementById('sel-target')
+  selT.disabled = targetFixed
+  if (targetFixed) { state.targetEq = 0; selT.value = 0 }
   refreshNotes()
+  updateHint()
 }
 
 // --- live neuroevolution (Web Worker) ---
@@ -161,7 +177,7 @@ function retrain() {
       trainWorker.terminate(); trainWorker = null
     }
   }
-  trainWorker.postMessage({ gens: 80, pop: 60 })
+  trainWorker.postMessage({ plantKey: state.plantKey })
 }
 
 // --- disturbances (verified-safe range) ---
@@ -182,6 +198,7 @@ document.getElementById('shove-l').onclick = () => shove(-1)
 document.getElementById('shove-r').onclick = () => shove(1)
 document.getElementById('reset').onclick = () => sim.reset(startState())
 document.getElementById('retrain').onclick = retrain
+document.getElementById('motor').onclick = () => { if (sim.armed) sim.disarm(); else sim.arm() }
 selPlant.onchange = () => { state.plantKey = selPlant.value; onPlantChange(); rebuild() }
 selCtrl.onchange = () => { state.ctrlKey = selCtrl.value; rebuild() }
 const selTarget = document.getElementById('sel-target')
@@ -191,11 +208,15 @@ document.getElementById('toggle-real').onclick = () => {
   sim.realistic = state.realistic
   paintToggle(); refreshNotes()
 }
+const heldKeys = new Set()
 window.addEventListener('keydown', e => {
-  if (e.code === 'ArrowLeft') { e.preventDefault(); shove(-1) }
-  else if (e.code === 'ArrowRight') { e.preventDefault(); shove(1) }
-  else if (e.code === 'Space') { e.preventDefault(); sim.reset() }
+  if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+    e.preventDefault()
+    if (state.ctrlKey === 'manual') heldKeys.add(e.code)       // hold to drive the cart
+    else shove(e.code === 'ArrowLeft' ? -1 : 1)                 // tap to shove
+  } else if (e.code === 'Space') { e.preventDefault(); sim.reset(startState()) }
 })
+window.addEventListener('keyup', e => heldKeys.delete(e.code))
 canvas.addEventListener('click', e => {
   const r = canvas.getBoundingClientRect()
   shove(e.clientX - r.left < r.width / 2 ? -1 : 1)
@@ -205,7 +226,15 @@ function paintToggle() {
   const on = state.realistic
   document.getElementById('switch').style.background = on ? '#06b6d4' : '#334155'
   document.getElementById('knob').style.left = on ? '18px' : '2px'
-  document.getElementById('hint').innerHTML = on
+  updateHint()
+}
+function updateHint() {
+  const h = document.getElementById('hint')
+  if (state.ctrlKey === 'manual') {
+    h.innerHTML = `<strong style="color:#e2e8f0;">← →</strong> hold to drive the cart · <strong style="color:#e2e8f0;">Space</strong> reset — balance it yourself`
+    return
+  }
+  h.innerHTML = state.realistic
     ? `<strong style="color:#e2e8f0;">Realistic:</strong> noisy encoders · EKF estimate (grey ghost) · actuator lag — watch it jitter`
     : `<strong style="color:#e2e8f0;">← →</strong> or click to shove · <strong style="color:#e2e8f0;">Space</strong> drop from hanging`
 }
@@ -215,13 +244,15 @@ const MODE_STYLE = {
   reach: { bg: '#f59e0b18', color: '#f59e0b', label: '◐ Reaching' },
   'swing-up': { bg: '#f59e0b18', color: '#f59e0b', label: '◐ Swinging up' },
   'kick-start': { bg: '#f59e0b18', color: '#f59e0b', label: '◐ Kick-starting' },
+  manual: { bg: '#33415518', color: '#94a3b8', label: '○ Manual — you drive' },
   init: { bg: '#33415518', color: '#94a3b8', label: '○ Idle' },
 }
 function fmtDeg(rad) { return (rad * 180 / Math.PI).toFixed(1) + '°' }
 
 function updatePanel() {
   const s = sim.state
-  const ms = MODE_STYLE[sim.mode] || MODE_STYLE.init
+  const ms = sim.armed ? (MODE_STYLE[sim.mode] || MODE_STYLE.init)
+    : { bg: '#ef444418', color: '#ef4444', label: '⏻ Motor off' }
   const badge = document.getElementById('mode-badge')
   badge.textContent = ms.label; badge.style.background = ms.bg; badge.style.color = ms.color
 
@@ -247,6 +278,16 @@ function updatePanel() {
     <div style="display:flex;justify-content:space-between;">
       <span style="color:#64748b;">${k}</span><span style="color:${c};font-weight:600;">${v}</span>
     </div>`).join('')
+
+  // Motor / safety cutoff UI
+  const motorBtn = document.getElementById('motor')
+  motorBtn.textContent = sim.armed ? '⏻ Motor: On' : '⏻ Motor: Off — click to re-arm'
+  motorBtn.style.color = sim.armed ? '' : '#ef4444'
+  const banner = document.getElementById('trip-banner')
+  if (sim.tripped) {
+    banner.style.display = ''
+    banner.textContent = `⚠ Safety cutoff — motor disabled: ${sim.tripReason}. Reset or re-arm to resume.`
+  } else banner.style.display = 'none'
 }
 
 function refreshNotes() {
@@ -255,7 +296,10 @@ function refreshNotes() {
     [CONTROLLERS[state.ctrlKey].label, {
       lqr: 'gains are solved live from the plant — the model is linearized about the target and the discrete Riccati equation is solved for optimal state feedback.',
       pid: 'inner PID holds the angle; an outer cascade loop leans the pole to recenter the cart. One SISO loop stabilizes one unactuated angle.',
-      neural: 'a small network (5→12→8→1, tanh) maps [sinθ, cosθ, θ̇, x, ẋ] straight to motor force. No control law was written — it was evolved by neuroevolution (tournament selection + mutation, reusing the creatures engine), learning both swing-up and balance from a fitness score.',
+      neural: state.plantKey === 'double'
+        ? 'a network (8→16→12→1, tanh) maps both links’ sin/cos, rates, and the cart state to motor force. Evolved by neuroevolution to BALANCE both-up and reject nudges (it does not swing the double up — that stays out of scope).'
+        : 'a small network (5→12→8→1, tanh) maps [sinθ, cosθ, θ̇, x, ẋ] straight to motor force. No control law was written — it was evolved by neuroevolution (tournament selection + mutation, reusing the creatures engine), learning both swing-up and balance from a fitness score.',
+      manual: 'no controller — you are the loop. Hold the arrow keys to push the cart and try to balance the pole yourself. Good for feeling how unstable it really is.',
     }[state.ctrlKey]],
   ]
   if (state.plantKey === 'double') {
@@ -279,9 +323,13 @@ let lastT = performance.now()
 function loop(now) {
   const dt = Math.min(0.05, (now - lastT) / 1000)
   lastT = now
+  if (state.ctrlKey === 'manual' && currentController.setDrive) {
+    currentController.setDrive((heldKeys.has('ArrowRight') ? 1 : 0) - (heldKeys.has('ArrowLeft') ? 1 : 0))
+  }
   sim.advance(dt)
   render(canvas, plant, sim.state, { estimate: state.realistic ? sim.estimate : null, force: sim.force })
   updatePanel()
+  if (state.ctrlKey === 'neural' && currentController.viz) renderNet(netCanvas, currentController.viz)
   requestAnimationFrame(loop)
 }
 window.__pendulumDebug = {
@@ -291,5 +339,8 @@ window.__pendulumDebug = {
   setController: k => { state.ctrlKey = k; selCtrl.value = k; rebuild() },
   setTarget: i => { state.targetEq = i; selTarget.value = i; rebuild() },
   setRealistic: v => { state.realistic = v; sim.realistic = v; paintToggle(); refreshNotes() },
+  get armed() { return sim.armed }, get tripped() { return sim.tripped }, get tripReason() { return sim.tripReason },
+  disarm: () => sim.disarm(), arm: () => sim.arm(),
+  get force() { return sim.force },
 }
 requestAnimationFrame(loop)

@@ -1,21 +1,37 @@
-// Neural policy definition for the single cart-pole, shared by training, the
-// live worker, and the runtime controller so they always agree on the network
-// shape and the input encoding.
+// Neural policy definitions, per plant, shared by training, the worker, the
+// runtime controller, and the network visualization so they all agree on the
+// network shape and input encoding.
 //
-// Inputs (5, normalized to ~[-1,1]): [sinθ, cosθ, θ̇/Wmax, x/half, ẋ/Vmax].
-// Using sin/cos instead of raw θ removes the ±π wrap discontinuity, which
-// matters for a policy that must both swing up and balance.
-// Output: one tanh in [-1,1], scaled to the motor force.
+// Angles are fed as sin/cos pairs (no ±π wrap discontinuity). Output is one
+// tanh in [-1,1], scaled to the motor force. `labels` name the inputs for the
+// live network view.
 
-export const ARCH = [5, 12, 8, 1]
-export const NORM = { W: 8, V: 4 } // rad/s and m/s normalizers
-
-export function inputsFor(plant, s) {
-  const half = plant.PARAMS.trackHalfWidth
-  return [Math.sin(s.theta), Math.cos(s.theta), s.thetadot / NORM.W, s.x / half, s.xdot / NORM.V]
+export const NEURAL = {
+  single: {
+    arch: [5, 12, 8, 1],
+    W: 8, V: 4,
+    labels: ['sinθ', 'cosθ', 'θ̇', 'x', 'ẋ'],
+    inputs: (plant, s) => [
+      Math.sin(s.theta), Math.cos(s.theta),
+      s.thetadot / 8, s.x / plant.PARAMS.trackHalfWidth, s.xdot / 4,
+    ],
+  },
+  double: {
+    arch: [8, 16, 12, 1],
+    W: 8, V: 4,
+    labels: ['sinθ₁', 'cosθ₁', 'sinθ₂', 'cosθ₂', 'θ̇₁', 'θ̇₂', 'x', 'ẋ'],
+    inputs: (plant, s) => [
+      Math.sin(s.theta1), Math.cos(s.theta1), Math.sin(s.theta2), Math.cos(s.theta2),
+      s.theta1dot / 8, s.theta2dot / 8, s.x / plant.PARAMS.trackHalfWidth, s.xdot / 4,
+    ],
+  },
 }
 
-export function policyForce(mlp, weights, plant, s) {
-  const out = mlp.forward(weights, inputsFor(plant, s))[0]
-  return out * plant.PARAMS.forceMax
+export function neuralConfig(plant) { return NEURAL[plant.meta.name] }
+
+// Compute the force AND expose activations (for the viz) via the optional out.
+export function policyForce(mlp, weights, plant, s, activationsOut) {
+  const cfg = NEURAL[plant.meta.name]
+  const out = mlp.forward(weights, cfg.inputs(plant, s), activationsOut)
+  return out[0] * plant.PARAMS.forceMax
 }

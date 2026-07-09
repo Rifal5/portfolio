@@ -49,7 +49,7 @@ function buildConfigs(plant, realism) {
   return { sensor: { noise, resolution }, processNoise, measNoise }
 }
 
-export function makeSim({ plant, controller, realistic = false, realism = REALISM, balanceRegion }) {
+export function makeSim({ plant, controller, realistic = false, realism = REALISM, balanceRegion, autoTrip = true }) {
   const controlDt = 1 / realism.controlHz
   const cfg = buildConfigs(plant, realism)
   const accumulator = makeAccumulator(SUBSTEP)
@@ -71,25 +71,50 @@ export function makeSim({ plant, controller, realistic = false, realism = REALIS
   let engaged = false // has the EKF-based regulator taken over?
   let mode = 'init'
 
+  // Safety layer — like a real rig's motor-enable + limit switches. `armed` gates
+  // the motor; the controller can auto-trip it (disable the motor and coast) when
+  // it has clearly lost control, and the user can kill/re-arm it manually.
+  let armed = true
+  let tripReason = null
+  let everBalanced = false // only arm auto-trip once the controller has balanced
+  let satTimer = 0, railTimer = 0
+
+  function trip(reason) { armed = false; tripReason = reason }
+
   function controlTick() {
     if (!realistic) {
       est = trueState
       const r = ctrl.compute(trueState); cmd = r.force; mode = r.mode
-      return
+    } else {
+      ekf.predict(uReal)
+      ekf.update(sensor.measure(plant.measure(trueState)))
+      est = ekf.state()
+      if (!engaged && inBalance(trueState)) engaged = true
+      const r = ctrl.compute(engaged ? est : trueState); cmd = r.force; mode = r.mode
     }
-    ekf.predict(uReal)
-    ekf.update(sensor.measure(plant.measure(trueState)))
-    est = ekf.state()
-    if (!engaged && inBalance(trueState)) engaged = true
-    const r = ctrl.compute(engaged ? est : trueState); cmd = r.force; mode = r.mode
+    if (mode === 'balance') everBalanced = true
   }
 
   function physicsSub(h) {
     controlTimer += h
     if (controlTimer >= controlDt) { controlTimer = 0; controlTick() }
-    uReal = realistic ? actuator.apply(cmd, h) : cmd
+
+    // Auto-trip: once the controller has balanced, disable the motor if it then
+    // saturates flat-out or pins the cart against the rail for too long — the
+    // signatures of a controller that has lost the pole.
+    if (armed && autoTrip && everBalanced) {
+      satTimer = Math.abs(cmd) >= plant.PARAMS.forceMax * 0.98 ? satTimer + h : 0
+      railTimer = Math.abs(trueState.x) >= plant.PARAMS.trackHalfWidth - 0.01 ? railTimer + h : 0
+      if (satTimer > 1.5) trip('motor saturated — controller lost the pole')
+      else if (railTimer > 1.2) trip('cart pinned against the rail')
+    }
+
+    const applied = armed ? cmd : 0 // disarmed = motor off, system coasts
+    uReal = realistic ? actuator.apply(applied, h) : applied
     trueState = plant.step(trueState, uReal, h)
   }
+
+  function clearSafety() { armed = true; tripReason = null; everBalanced = false; satTimer = 0; railTimer = 0 }
 
   return {
     advance(dt) { accumulator.advance(dt, physicsSub) },
@@ -97,9 +122,15 @@ export function makeSim({ plant, controller, realistic = false, realism = REALIS
       trueState = s || plant.initialState(); est = trueState
       ctrl.reset(); ekf.reset(plant.toVec(trueState)); actuator.reset()
       accumulator.reset(); cmd = 0; uReal = 0; controlTimer = Infinity; engaged = false; mode = 'init'
+      clearSafety()
     },
     disturb(fn) { trueState = fn(trueState) },
     setController(c) { ctrl = c; c.reset(); engaged = false },
+    arm() { clearSafety() },
+    disarm() { armed = false; tripReason = 'motor disabled' },
+    get armed() { return armed },
+    get tripped() { return !armed && tripReason !== 'motor disabled' },
+    get tripReason() { return tripReason },
     get state() { return trueState },
     get estimate() { return est },
     get force() { return uReal },

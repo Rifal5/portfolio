@@ -42,8 +42,10 @@ export function makeMLP(arch) {
     return p
   }
 
-  // Not re-entrant (shared buffers), no allocation in the hot loop.
-  function forward(params, inputs) {
+  // Not re-entrant (shared buffers), no allocation in the hot loop. If
+  // `activationsOut` (array of arrays, one per layer incl. input) is given, it
+  // receives a copy of every layer's activations — used by the network view.
+  function forward(params, inputs, activationsOut) {
     act[0].set(inputs)
     for (let l = 0; l < layout.layers.length; l++) {
       const L = layout.layers[l]
@@ -56,8 +58,15 @@ export function makeMLP(arch) {
         aCur[j] = Math.tanh(sum)
       }
     }
+    if (activationsOut) for (let l = 0; l < act.length; l++) if (activationsOut[l]) activationsOut[l].set(act[l])
     return act[act.length - 1]
   }
 
-  return { arch, paramCount: layout.total, randomParams, mutate, forward }
+  // Weight from input i of layer l to neuron j (for drawing edges).
+  function weightAt(params, l, j, i) {
+    const L = layout.layers[l]
+    return params[L.wOffset + j * L.nIn + i]
+  }
+
+  return { arch, paramCount: layout.total, layers: layout.layers, randomParams, mutate, forward, weightAt }
 }

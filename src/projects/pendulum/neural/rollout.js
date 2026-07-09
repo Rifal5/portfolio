@@ -1,39 +1,51 @@
-// Fitness rollout for evolving a single-pole neural controller. Scores a weight
-// vector by simulating the pendulum under the policy from several start states
-// (hanging AND various tilts, so the champion learns to both swing up and
-// balance) and rewarding time spent upright, minus penalties for heavy force use
-// and cart drift. Averaged over the starts to reduce luck.
-//
-// Kept dependency-light and synchronous so the SAME module runs in the offline
-// training script, the headless test, and the Web Worker.
+// Fitness rollout for evolving a neural controller, plant-aware:
+//   single — reward time upright from hanging AND tilts (learns swing-up + balance).
+//   double — reward both links near up-up from small perturbations (balance only;
+//            global swing-up of the double is out of scope).
+// Penalizes heavy force and cart drift; averaged over starts. Runs unchanged in
+// the offline trainer, the headless test, and the Web Worker.
 
 import { makeMLP } from '../../../lib/evolve/mlp.js'
-import * as single from '../plants/single.js'
-import { ARCH, inputsFor } from './policy.js'
+import { neuralConfig } from './policy.js'
 
 const DT = 1 / 120
-const T = 7 // s per rollout
-const STARTS = [Math.PI, 2.2, 1.2, 0.4, -0.4, -1.2] // initial theta values (rest)
+const wrap = a => { a = (a + Math.PI) % (2 * Math.PI); if (a < 0) a += 2 * Math.PI; return a - Math.PI }
 
-export function makeRollout(plant = single) {
-  const mlp = makeMLP(ARCH)
+const SPEC = {
+  single: {
+    T: 7,
+    starts: [Math.PI, 2.2, 1.2, 0.4, -0.4, -1.2].map(theta => ({ x: 0, xdot: 0, theta, thetadot: 0 })),
+    reward: s => 0.5 * (1 + Math.cos(s.theta)),
+    fell: () => false,
+  },
+  double: {
+    T: 5,
+    starts: [0.06, 0.15, -0.12, 0.2].map(d => ({ x: 0, xdot: 0, theta1: d, theta2: -d * 0.7, theta1dot: 0, theta2dot: 0 })),
+    reward: s => 0.25 * (1 + Math.cos(s.theta1)) + 0.25 * (1 + Math.cos(s.theta2)),
+    fell: s => Math.abs(wrap(s.theta1)) > 1.2 || Math.abs(wrap(s.theta2)) > 1.2,
+  },
+}
+
+export function makeRollout(plant) {
+  const cfg = neuralConfig(plant)
+  const mlp = makeMLP(cfg.arch)
+  const spec = SPEC[plant.meta.name]
   const fMax = plant.PARAMS.forceMax, half = plant.PARAMS.trackHalfWidth
 
   function evaluate(weights) {
     let total = 0
-    for (const theta0 of STARTS) {
-      let s = { x: 0, xdot: 0, theta: theta0, thetadot: 0 }
-      let fit = 0
-      for (let i = 0; i < Math.round(T / DT); i++) {
-        let f = mlp.forward(weights, inputsFor(plant, s))[0] * fMax
+    for (const start of spec.starts) {
+      let s = { ...start }, fit = 0
+      for (let i = 0; i < Math.round(spec.T / DT); i++) {
+        let f = mlp.forward(weights, cfg.inputs(plant, s))[0] * fMax
         f = Math.max(-fMax, Math.min(fMax, f))
         s = plant.step(s, f, DT)
-        const upright = 0.5 * (1 + Math.cos(s.theta))            // 1 up, 0 down
-        fit += (upright - 0.02 * Math.abs(f) / fMax - 0.05 * Math.abs(s.x) / half) * DT
+        fit += (spec.reward(s) - 0.02 * Math.abs(f) / fMax - 0.04 * Math.abs(s.x) / half) * DT
+        if (spec.fell(s)) { fit -= 1; break }
       }
       total += fit
     }
-    return total / STARTS.length
+    return total / spec.starts.length
   }
 
   return { mlp, evaluate, paramCount: mlp.paramCount, randomParams: mlp.randomParams, mutate: mlp.mutate }
