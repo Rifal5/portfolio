@@ -1,7 +1,7 @@
 import '../../styles/main.css'
 import { PLANTS } from './plants/index.js'
 import { CONTROLLERS } from './controllers/index.js'
-import { makeSingleSwingUp } from './controllers/energy.js'
+import { makeSingleSwingUp, makeDoubleSwingUp } from './controllers/energy.js'
 import { makeSim, SUBSTEP } from './sim.js'
 import { render } from './render.js'
 import { renderNet } from './net-view.js'
@@ -128,9 +128,15 @@ let plant, sim
 function buildController() {
   const c = CONTROLLERS[state.ctrlKey]
   if (plant.meta.name === 'double') {
-    // LQR stabilizes the selected equilibrium (started near it). The neural
-    // balancer holds both-up only. Either way, no global swing-up (out of scope).
-    if (state.ctrlKey === 'lqr') return c.make(plant, { targetEq: state.targetEq, enter: () => true, exit: () => false })
+    if (state.ctrlKey === 'lqr') {
+      // Proper basin + energy-pumping transition (double dims: theta1=1, theta2=2,
+      // theta1dot=4, theta2dot=5). LQR engages only inside the target basin;
+      // outside it, the swing-up phase actively drives toward the target (it
+      // reliably reaches the lower-energy targets; inverted ones are hard).
+      const enter = e => Math.abs(e[1]) < 0.35 && Math.abs(e[2]) < 0.35 && Math.abs(e[4]) < 2.5 && Math.abs(e[5]) < 2.5
+      const exit = e => Math.abs(e[1]) > 0.6 || Math.abs(e[2]) > 0.6 || Math.abs(e[4]) > 4.5 || Math.abs(e[5]) > 4.5
+      return c.make(plant, { targetEq: state.targetEq, swingUp: makeDoubleSwingUp(plant, state.targetEq), enter, exit })
+    }
     return c.make(plant, {})
   }
   const swing = SWINGUPS[state.plantKey]
@@ -365,7 +371,7 @@ function refreshNotes() {
     }[state.ctrlKey]],
   ]
   if (state.plantKey === 'double') {
-    common.push(['Four equilibria', 'each link is up (0) or down (π), giving four balance states. A per-equilibrium LQR holds any of them from nearby — even both-up, the hardest. Changing the target re-aims the controller live (the pole moves there rather than teleporting); reaching a harder inverted state from far away isn’t generally possible with one cart force — that transition is a research problem, so it may fall (and the safety cutoff catches it). "Reset near target" snaps to a clean hold.'])
+    common.push(['Four equilibria', 'each link is up (0) or down (π), giving four balance states. A per-equilibrium LQR holds any of them from nearby — even both-up, the hardest. Changing the target runs an energy-pumping transition toward it, then the LQR catches it when it enters the basin (mode shows swing-up → balancing). It reliably reaches the lower-energy targets; energy pumping fixes total energy but can’t pin which of the many same-energy configurations you land in, so reaching an inverted state from far away is a research problem it keeps trying at rather than always achieving. "Reset near target" snaps to a clean hold.'])
   }
   const realism = state.realistic
     ? ['Realistic loop', 'positions read through noisy, quantized encoders (no velocity sensor); an Extended Kalman Filter reconstructs the full state (grey ghost); the command passes through a saturating, slew- and lag-limited actuator. The controller acts on the estimate — so it jitters and works harder, like real hardware.']

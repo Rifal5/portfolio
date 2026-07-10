@@ -26,3 +26,29 @@ export function makeSingleSwingUp(plant, p = plant.PARAMS) {
     return { force, mode: 'swing-up' }
   }
 }
+
+// Energy-pumping transition for the DOUBLE toward a target equilibrium. Same
+// idea as the single (drive the total energy toward the target's energy through
+// the cart-pole coupling), generalized: the cart's acceleration couples to both
+// links via d2·cosθ1·θ̇1 + d3·cosθ2·θ̇2. HONEST LIMITATION: energy pumping fixes
+// the total energy but a two-link system has many configurations at the same
+// energy, so this reliably reaches only the low targets (→ hanging); reaching an
+// inverted equilibrium from far away is a research-grade problem (the neural
+// controller is the better bet, and even it is a stretch). The controller still
+// runs it as an honest "trying" phase; the LQR catches it if it enters the basin.
+export function makeDoubleSwingUp(plant, targetEq, p = plant.PARAMS) {
+  const a1 = p.L1 / 2, a2 = p.L2 / 2
+  const d2 = p.m1 * a1 + p.m2 * p.L1, d3 = p.m2 * a2
+  const Etarget = plant.energy(plant.fromVec(plant.meta.equilibria[targetEq].x), p)
+  const GAIN = 9, KPOS = 3, KVEL = 2
+  return function swingUp(s) {
+    const coupling = d2 * Math.cos(s.theta1) * s.theta1dot + d3 * Math.cos(s.theta2) * s.theta2dot
+    if (Math.abs(s.theta1dot) < 0.05 && Math.abs(s.theta2dot) < 0.05) {
+      // At rest the coupling vanishes; a kick breaks the symmetry so pumping starts.
+      return { force: p.forceMax * 0.6 * (s.x > 0.3 ? -1 : 1), mode: 'kick-start' }
+    }
+    const E = plant.energy(s, p)
+    const force = GAIN * coupling * (E - Etarget) - KPOS * s.x - KVEL * s.xdot
+    return { force, mode: 'swing-up' }
+  }
+}

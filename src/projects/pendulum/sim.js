@@ -76,7 +76,6 @@ export function makeSim({ plant, controller, realistic = false, realism = REALIS
   // it has clearly lost control, and the user can kill/re-arm it manually.
   let armed = true
   let tripReason = null
-  let everBalanced = false // only arm auto-trip once the controller has balanced
   let satTimer = 0, railTimer = 0
 
   function trip(reason) { armed = false; tripReason = reason }
@@ -92,29 +91,29 @@ export function makeSim({ plant, controller, realistic = false, realism = REALIS
       if (!engaged && inBalance(trueState)) engaged = true
       const r = ctrl.compute(engaged ? est : trueState); cmd = r.force; mode = r.mode
     }
-    if (mode === 'balance') everBalanced = true
   }
 
   function physicsSub(h) {
     controlTimer += h
     if (controlTimer >= controlDt) { controlTimer = 0; controlTick() }
 
-    // Auto-trip: once the controller has balanced, disable the motor if it then
-    // saturates flat-out or pins the cart against the rail for too long — the
-    // signatures of a controller that has lost the pole.
-    if (armed && autoTrip && everBalanced) {
+    // Auto-trip: only while the controller is actually BALANCING (not during a
+    // swing-up phase, where saturation is normal). If it's supposedly balancing
+    // yet sits flat-out or pinned against the rail, it has lost the pole → cut
+    // the motor and coast.
+    if (armed && autoTrip && mode === 'balance') {
       satTimer = Math.abs(cmd) >= plant.PARAMS.forceMax * 0.98 ? satTimer + h : 0
       railTimer = Math.abs(trueState.x) >= plant.PARAMS.trackHalfWidth - 0.01 ? railTimer + h : 0
       if (satTimer > 1.5) trip('motor saturated — controller lost the pole')
       else if (railTimer > 1.2) trip('cart pinned against the rail')
-    }
+    } else { satTimer = 0; railTimer = 0 }
 
     const applied = armed ? cmd : 0 // disarmed = motor off, system coasts
     uReal = realistic ? actuator.apply(applied, h) : applied
     trueState = plant.step(trueState, uReal, h)
   }
 
-  function clearSafety() { armed = true; tripReason = null; everBalanced = false; satTimer = 0; railTimer = 0 }
+  function clearSafety() { armed = true; tripReason = null; satTimer = 0; railTimer = 0 }
 
   return {
     advance(dt) { accumulator.advance(dt, physicsSub) },
@@ -125,7 +124,7 @@ export function makeSim({ plant, controller, realistic = false, realism = REALIS
       clearSafety()
     },
     disturb(fn) { trueState = fn(trueState) },
-    setController(c) { ctrl = c; c.reset(); engaged = false },
+    setController(c) { ctrl = c; c.reset(); engaged = false; clearSafety() },
     arm() { clearSafety() },
     disarm() { armed = false; tripReason = 'motor disabled' },
     get armed() { return armed },
