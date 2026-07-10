@@ -28,6 +28,9 @@ export function makeController(plant, opts = {}) {
   const t = angleIndex(dims) // theta index; cart pos/vel are dims 0/1
   let integ = 0
 
+  // Live term breakdown for the UI panel (updated each control step).
+  const live = { setpoint: 0, integ: 0, P: 0, I: 0, D: 0, force: 0 }
+
   const balance = {
     law(e, _x, h) {
       const cartPos = e[0], cartVel = e[1], ang = e[t], angRate = e[t + 1]
@@ -35,11 +38,19 @@ export function makeController(plant, opts = {}) {
       thetaSp = Math.max(-g.leanMax, Math.min(g.leanMax, thetaSp))
       const aErr = ang - thetaSp
       integ = Math.max(-g.iMax, Math.min(g.iMax, integ + aErr * h))
-      return g.Kp * aErr + g.Ki * integ + g.Kd * angRate
+      const P = g.Kp * aErr, I = g.Ki * integ, D = g.Kd * angRate
+      const force = P + I + D
+      live.setpoint = thetaSp; live.integ = integ; live.P = P; live.I = I; live.D = D; live.force = force
+      return force
     },
-    reset() { integ = 0 },
+    reset() { integ = 0; live.P = live.I = live.D = live.force = live.integ = live.setpoint = 0 },
   }
 
   const ctrl = makeSwitched(plant, { targetEq, balance, swingUp, enter, exit, controlDt: dt })
-  return { compute: ctrl.compute, reset: ctrl.reset, get balancing() { return ctrl.balancing } }
+  return {
+    compute: ctrl.compute, reset: ctrl.reset,
+    get balancing() { return ctrl.balancing },
+    // Controller internals for the UI panel: gains + live P/I/D breakdown.
+    get info() { return { type: 'pid', gains: g, live } },
+  }
 }

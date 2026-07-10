@@ -11,5 +11,6 @@ export function makeController(plant) {
     compute() { return { force: drive * plant.PARAMS.forceMax * DRIVE_FRAC, mode: 'manual' } },
     reset() { drive = 0 },
     setDrive(d) { drive = Math.max(-1, Math.min(1, d)) },
+    get info() { return { type: 'manual', drive } },
   }
 }

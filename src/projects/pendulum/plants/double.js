@@ -83,14 +83,24 @@ export function derivative(v, force, p = PARAMS) {
     c.f2 * s2 + c.d5 * s12 * th1d * th1d - p.jointDamping * th2d,
   ]
   const acc = matVec(inv(M), rhs) // [xddot, th1ddot, th2ddot]
+  // Rail end-stop as a hard constraint (see single.js): while the motor drives
+  // the cart into a stop, force xAcc = 0 and re-solve the 2×2 link subsystem (the
+  // force lives only in the cart row, so with xAcc = 0 it never reaches the links).
+  const x = v[0]
+  if ((x >= p.trackHalfWidth && force > 0) || (x <= -p.trackHalfWidth && force < 0)) {
+    const det = M[1][1] * M[2][2] - M[1][2] * M[2][1]
+    const th1a = (M[2][2] * rhs[1] - M[1][2] * rhs[2]) / det
+    const th2a = (-M[2][1] * rhs[1] + M[1][1] * rhs[2]) / det
+    return [xd, th1d, th2d, 0, th1a, th2a]
+  }
   return [xd, th1d, th2d, acc[0], acc[1], acc[2]]
 }
 
 export function step(s, force, dt, p = PARAMS) {
-  const nv = rk4(derivative, toVec(s), force, dt, p)
+  const nv = rk4(derivative, toVec(s), force, dt, p) // wall constraint is inside the dynamics
   let nx = nv[0], nxd = nv[3]
-  if (nx > p.trackHalfWidth) { nx = p.trackHalfWidth; nxd = -nxd * 0.3 }
-  else if (nx < -p.trackHalfWidth) { nx = -p.trackHalfWidth; nxd = -nxd * 0.3 }
+  if (nx > p.trackHalfWidth) { nx = p.trackHalfWidth; if (nxd > 0) nxd = 0 }
+  else if (nx < -p.trackHalfWidth) { nx = -p.trackHalfWidth; if (nxd < 0) nxd = 0 }
   return fromVec([nx, wrapPi(nv[1]), wrapPi(nv[2]), nxd, nv[4], nv[5]])
 }
 

@@ -54,25 +54,46 @@ export function wrapPi(a) {
 // Array-form derivative for RK4 / linearization: (vec, force, p) -> dvec.
 export function derivative(v, force, p = PARAMS) {
   const { cartMass: M, poleMass: m, poleHalfLength: L, gravity: g, cartDamping: b, poleDamping: bp } = p
-  const [, xdot, theta, thetadot] = v
+  const [x, xdot, theta, thetadot] = v
   const sinT = Math.sin(theta), cosT = Math.cos(theta)
   const totalMass = M + m, pml = m * L
+  const denom = L * (4 / 3 - (m * cosT * cosT) / totalMass)
   const temp = (force + pml * thetadot * thetadot * sinT - b * xdot) / totalMass
-  const thetaAcc = (g * sinT - cosT * temp - bp * thetadot) / (L * (4 / 3 - (m * cosT * cosT) / totalMass))
+  const thetaAcc = (g * sinT - cosT * temp - bp * thetadot) / denom
   const xAcc = temp - (pml * thetaAcc * cosT) / totalMass
+  // Rail end-stop as a hard non-penetrating constraint: while the motor is
+  // driving the cart into a stop, the wall's normal force pins the cart
+  // (xAcc = 0) and the pole swings on a FIXED pivot. The drive force is absorbed
+  // by the wall — it never reaches the pole (temp -> 0), so it can't tilt/pump it.
+  // Gating on the drive-force direction (not the net acceleration) keeps the cart
+  // firmly on the stop instead of letting the pole's reaction bounce it off and
+  // get re-slammed, which would numerically pump energy into the pole.
+  if ((x >= p.trackHalfWidth && force > 0) || (x <= -p.trackHalfWidth && force < 0)) {
+    // Fixed-pivot pendulum: use the CONSTANT rod inertia denominator L·(4/3), not
+    // the free-cart `denom` (which varies with cos²θ). A θ-dependent inertia here
+    // would be a parametric oscillator and would spuriously pump the pole.
+    return [xdot, 0, thetadot, (g * sinT - bp * thetadot) / (L * (4 / 3))]
+  }
   return [xdot, xAcc, thetadot, thetaAcc]
 }
 
-// One physics substep — semi-implicit Euler, identical to the original, with a
-// soft track stop so the cart can't run off the rail.
+// One physics substep — semi-implicit Euler. The cart can't penetrate the rail:
+// at a stop, outward velocity is killed (inelastic) so it neither passes through
+// nor bounces (a bounce would numerically pump the pole).
 export function step(s, force, dt, p = PARAMS) {
   const d = derivative(toVec(s), force, p)
-  let nx = s.x + s.xdot * dt
   let nxdot = s.xdot + d[1] * dt
-  const ntheta = s.theta + s.thetadot * dt
   const nthetadot = s.thetadot + d[3] * dt
-  if (nx > p.trackHalfWidth) { nx = p.trackHalfWidth; nxdot = -nxdot * 0.3 }
-  else if (nx < -p.trackHalfWidth) { nx = -p.trackHalfWidth; nxdot = -nxdot * 0.3 }
+  // Normal operation uses the original explicit Euler (positions from the OLD
+  // velocities) so the controllers' tuning is unchanged — they keep the cart off
+  // the rails, so they never hit the branch below. When the cart is PINNED at a
+  // rail the pole is a free oscillator, and explicit Euler would spuriously pump
+  // it; integrate that case semi-implicitly (position from the NEW velocity).
+  const pinned = (s.x >= p.trackHalfWidth && force > 0) || (s.x <= -p.trackHalfWidth && force < 0)
+  let nx = s.x + (pinned ? nxdot : s.xdot) * dt
+  const ntheta = s.theta + (pinned ? nthetadot : s.thetadot) * dt
+  if (nx > p.trackHalfWidth) { nx = p.trackHalfWidth; if (nxdot > 0) nxdot = 0 }
+  else if (nx < -p.trackHalfWidth) { nx = -p.trackHalfWidth; if (nxdot < 0) nxdot = 0 }
   return { x: nx, xdot: nxdot, theta: wrapPi(ntheta), thetadot: nthetadot }
 }
 

@@ -50,6 +50,10 @@ document.querySelector('#app').innerHTML = `
         <p style="font-size:0.8rem;font-weight:600;color:#e2e8f0;margin-bottom:0.6rem;">State</p>
         <div id="state-panel" style="display:flex;flex-direction:column;gap:0.5rem;font-size:0.73rem;"></div>
       </div>
+      <div id="ctrl-panel" style="padding:0.8rem;border-bottom:1px solid #1e1e2e;display:none;">
+        <p id="ctrl-title" style="font-size:0.8rem;font-weight:600;color:#e2e8f0;margin-bottom:0.5rem;">Controller</p>
+        <div id="ctrl-body" style="font-size:0.72rem;"></div>
+      </div>
       <div style="padding:0.8rem;border-bottom:1px solid #1e1e2e;">
         <p style="font-size:0.8rem;font-weight:600;color:#e2e8f0;margin-bottom:0.5rem;">Disturb it</p>
         <div style="display:flex;gap:0.4rem;">
@@ -202,7 +206,18 @@ document.getElementById('motor').onclick = () => { if (sim.armed) sim.disarm(); 
 selPlant.onchange = () => { state.plantKey = selPlant.value; onPlantChange(); rebuild() }
 selCtrl.onchange = () => { state.ctrlKey = selCtrl.value; rebuild() }
 const selTarget = document.getElementById('sel-target')
-selTarget.onchange = () => { state.targetEq = +selTarget.value; rebuild() }
+selTarget.onchange = () => {
+  state.targetEq = +selTarget.value
+  // Live re-target: keep the current state and swap in the new equilibrium's
+  // controller, so the pole MOVES toward the new target rather than teleporting.
+  // Transitions toward a lower-energy state (e.g. back to hanging) complete
+  // smoothly; reaching a harder inverted state from far away may not be possible
+  // and the safety cutoff will catch the fall. "Reset near target" snaps to a
+  // clean hold when you want to see a specific balance state held.
+  currentController = buildController()
+  sim.setController(currentController)
+  refreshNotes()
+}
 document.getElementById('toggle-real').onclick = () => {
   state.realistic = !state.realistic
   sim.realistic = state.realistic
@@ -279,6 +294,8 @@ function updatePanel() {
       <span style="color:#64748b;">${k}</span><span style="color:${c};font-weight:600;">${v}</span>
     </div>`).join('')
 
+  renderCtrlPanel()
+
   // Motor / safety cutoff UI
   const motorBtn = document.getElementById('motor')
   motorBtn.textContent = sim.armed ? '⏻ Motor: On' : '⏻ Motor: Off — click to re-arm'
@@ -288,6 +305,51 @@ function updatePanel() {
     banner.style.display = ''
     banner.textContent = `⚠ Safety cutoff — motor disabled: ${sim.tripReason}. Reset or re-arm to resume.`
   } else banner.style.display = 'none'
+}
+
+// Per-controller internals panel (LQR gains, PID live terms, manual drive).
+// Neural shows its dedicated network view instead, so this panel hides for it.
+function renderCtrlPanel() {
+  const info = currentController.info
+  const panel = document.getElementById('ctrl-panel')
+  if (!info || info.type === 'neural') { panel.style.display = 'none'; return }
+  panel.style.display = ''
+  const title = document.getElementById('ctrl-title')
+  const body = document.getElementById('ctrl-body')
+
+  if (info.type === 'lqr') {
+    title.textContent = 'LQR — optimal state feedback'
+    const rows = info.dims.map((d, i) =>
+      `<div style="display:flex;justify-content:space-between;"><span style="color:#64748b;">K·${d}</span><span style="color:#e2e8f0;font-weight:600;">${info.K[i].toFixed(2)}</span></div>`).join('')
+    body.innerHTML = `
+      <p style="color:#64748b;line-height:1.5;margin-bottom:0.5rem;">u = −K·(state − <span style="color:#94a3b8;">${info.eq}</span>). Gains solved from the model (Riccati), R=${info.R}.</p>
+      <div style="display:flex;flex-direction:column;gap:0.35rem;">${rows}</div>
+      ${info.weights ? `<p style="color:#475569;margin-top:0.5rem;">Q weights: [${info.weights.join(', ')}]</p>` : ''}`
+  } else if (info.type === 'pid') {
+    const g = info.gains, l = info.live
+    title.textContent = 'PID — cascade'
+    const term = (label, v, max, col) => `
+      <div>
+        <div style="display:flex;justify-content:space-between;"><span style="color:#64748b;">${label}</span><span style="color:${col};font-weight:600;">${v.toFixed(1)} N</span></div>
+        <div style="height:4px;background:#1e1e2e;border-radius:2px;position:relative;margin-top:2px;">
+          <div style="position:absolute;left:50%;top:0;height:4px;background:${col};border-radius:2px;width:${Math.min(50, Math.abs(v) / max * 50).toFixed(0)}%;${v >= 0 ? '' : 'transform:translateX(-100%);'}"></div>
+        </div>
+      </div>`
+    body.innerHTML = `
+      <p style="color:#64748b;line-height:1.5;">Inner angle PID &nbsp;Kp=${g.Kp} Ki=${g.Ki} Kd=${g.Kd}<br>Outer cart→lean &nbsp;${g.leanKp}, ${g.leanKd}</p>
+      <div style="display:flex;flex-direction:column;gap:0.35rem;margin-top:0.5rem;">
+        ${term('P · angle', l.P, Math.max(1, g.Kp * 0.5), '#22c55e')}
+        ${term('I · ∫angle', l.I, Math.max(1, g.Ki * g.iMax), '#f59e0b')}
+        ${term('D · rate', l.D, Math.max(1, g.Kd * 4), '#38bdf8')}
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:0.5rem;color:#64748b;">
+        <span>lean setpoint ${(l.setpoint * 180 / Math.PI).toFixed(1)}°</span>
+        <span style="color:#e2e8f0;">Σ ${l.force.toFixed(1)} N</span>
+      </div>`
+  } else if (info.type === 'manual') {
+    title.textContent = 'Manual — you drive'
+    body.innerHTML = `<p style="color:#64748b;line-height:1.5;">No controller in the loop. Drive input <span style="color:#e2e8f0;font-weight:600;">${(info.drive * 100).toFixed(0)}%</span> of ${(plant.PARAMS.forceMax * 0.6).toFixed(1)} N (hold ← →).</p>`
+  }
 }
 
 function refreshNotes() {
@@ -303,7 +365,7 @@ function refreshNotes() {
     }[state.ctrlKey]],
   ]
   if (state.plantKey === 'double') {
-    common.push(['Four equilibria', 'each link is up (0) or down (π), giving four balance states. A per-equilibrium LQR holds any of them from nearby — even both-up, the hardest. Global swing-up between inverted states with one cart force is a research problem, so the demo starts near the chosen target rather than swinging up to it.'])
+    common.push(['Four equilibria', 'each link is up (0) or down (π), giving four balance states. A per-equilibrium LQR holds any of them from nearby — even both-up, the hardest. Changing the target re-aims the controller live (the pole moves there rather than teleporting); reaching a harder inverted state from far away isn’t generally possible with one cart force — that transition is a research problem, so it may fall (and the safety cutoff catches it). "Reset near target" snaps to a clean hold.'])
   }
   const realism = state.realistic
     ? ['Realistic loop', 'positions read through noisy, quantized encoders (no velocity sensor); an Extended Kalman Filter reconstructs the full state (grey ghost); the command passes through a saturating, slew- and lag-limited actuator. The controller acts on the estimate — so it jitters and works harder, like real hardware.']

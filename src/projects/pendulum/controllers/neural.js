@@ -40,5 +40,6 @@ export function makeController(plant, opts = {}) {
     get viz() {
       return { arch: cfg.arch, labels: cfg.labels, activations, weightAt: (l, j, i) => mlp.weightAt(weights, l, j, i) }
     },
+    get info() { return { type: 'neural', arch: cfg.arch } },
   }
 }
