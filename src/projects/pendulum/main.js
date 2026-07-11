@@ -68,8 +68,8 @@ document.querySelector('#app').innerHTML = `
         <p style="font-size:0.8rem;font-weight:600;color:#e2e8f0;margin-bottom:0.4rem;">Network</p>
         <canvas id="net-canvas" style="width:100%;height:150px;display:block;background:#0d0d14;border:1px solid #1e1e2e;border-radius:6px;"></canvas>
         <p style="font-size:0.62rem;color:#475569;margin:0.35rem 0 0.6rem;line-height:1.4;">Nodes = live activations (green +, red −); edges = weights (cyan +, red −). Inputs left, motor force right.</p>
-        <button id="retrain" class="btn btn-ghost" style="width:100%;font-size:0.75rem;padding:0.4rem;">⟳ Retrain from scratch</button>
-        <p id="train-status" style="font-size:0.68rem;color:#64748b;margin-top:0.5rem;line-height:1.5;">Ships with a pre-trained champion. Retrain to watch neuroevolution climb, then it takes over live.</p>
+        <button id="retrain" class="btn btn-ghost" style="width:100%;font-size:0.75rem;padding:0.4rem;">⟳ Train continuously</button>
+        <p id="train-status" style="font-size:0.68rem;color:#64748b;margin-top:0.5rem;line-height:1.5;">Ships pre-trained. Train continuously to keep improving it live — it never caps out.</p>
       </div>
       <div style="padding:0.8rem;">
         <p style="font-size:0.8rem;font-weight:600;color:#e2e8f0;margin-bottom:0.4rem;">How it works</p>
@@ -137,7 +137,7 @@ function buildController() {
       const exit = e => Math.abs(e[1]) > 0.6 || Math.abs(e[2]) > 0.6 || Math.abs(e[4]) > 4.5 || Math.abs(e[5]) > 4.5
       return c.make(plant, { targetEq: state.targetEq, swingUp: makeDoubleSwingUp(plant, state.targetEq), enter, exit })
     }
-    return c.make(plant, {})
+    return c.make(plant, { targetEq: state.targetEq }) // goal-conditioned neural
   }
   const swing = SWINGUPS[state.plantKey]
   return c.make(plant, swing ? { swingUp: swing(plant) } : {})
@@ -148,8 +148,7 @@ function buildController() {
 function startState() {
   if (state.ctrlKey === 'manual') return plant.initialState() // start at rest; you drive
   if (plant.meta.name !== 'double') return plant.initialState()
-  const idx = state.ctrlKey === 'neural' ? 0 : state.targetEq // neural = both-up
-  const eq = plant.fromVec(plant.meta.equilibria[idx].x)
+  const eq = plant.fromVec(plant.meta.equilibria[state.targetEq].x) // start near the selected target
   return { ...eq, theta1: eq.theta1 + 0.1, theta2: eq.theta2 - 0.1, x: 0 }
 }
 let currentController
@@ -159,35 +158,38 @@ function rebuild() {
   sim = makeSim({ plant, controller: currentController, realistic: state.realistic, autoTrip: state.ctrlKey !== 'manual' })
   sim.reset(startState())
   document.getElementById('neural-panel').style.display = state.ctrlKey === 'neural' ? '' : 'none'
-  // Neural on the double only balances both-up, so the target selector is fixed there.
-  const targetFixed = state.plantKey === 'double' && state.ctrlKey === 'neural'
-  const selT = document.getElementById('sel-target')
-  selT.disabled = targetFixed
-  if (targetFixed) { state.targetEq = 0; selT.value = 0 }
+  document.getElementById('sel-target').disabled = false // enabled for both LQR and (goal-conditioned) neural
+  if (state.ctrlKey !== 'neural') stopTraining() // continuous training only makes sense for neural
   refreshNotes()
   updateHint()
 }
 
-// --- live neuroevolution (Web Worker) ---
+// --- continuous neuroevolution (Web Worker), hot-swapped live ---
 let trainWorker = null
-function retrain() {
+function toggleTraining() {
+  if (trainWorker) { stopTraining(); return }
   const status = document.getElementById('train-status')
-  const btn = document.getElementById('retrain')
-  if (trainWorker) { trainWorker.terminate(); trainWorker = null }
+  document.getElementById('retrain').textContent = '⏹ Stop training'
   trainWorker = new Worker(new URL('./neural/train-worker.js', import.meta.url), { type: 'module' })
-  btn.disabled = true; btn.textContent = 'Evolving…'
   trainWorker.onmessage = (e) => {
     const m = e.data
     if (m.type === 'progress') {
-      status.textContent = `Gen ${m.gen + 1}/${m.gens} — best fitness ${m.best.toFixed(2)}`
-    } else if (m.type === 'done') {
+      status.textContent = `Training live… ${m.text}`
+    } else if (m.type === 'champion') {
+      // Hot-swap the refined network into the live controller.
       if (state.ctrlKey === 'neural' && currentController.setWeights) currentController.setWeights(m.weights)
-      status.textContent = `Done — champion fitness ${m.fitness.toFixed(2)}. It's driving now.`
-      btn.disabled = false; btn.textContent = '⟳ Retrain from scratch'
-      trainWorker.terminate(); trainWorker = null
+      status.textContent = `Training live — ${m.text}`
     }
   }
-  trainWorker.postMessage({ plantKey: state.plantKey })
+  // Seed from the current champion so it keeps improving, and run indefinitely.
+  trainWorker.postMessage({ plantKey: state.plantKey, continuous: true, seed: Array.from(currentController.weights) })
+}
+function stopTraining() {
+  if (trainWorker) { trainWorker.terminate(); trainWorker = null }
+  const btn = document.getElementById('retrain')
+  if (btn) btn.textContent = '⟳ Train continuously'
+  const st = document.getElementById('train-status')
+  if (st) st.textContent = 'Ships pre-trained. Train continuously to keep improving it live — it never caps out.'
 }
 
 // --- disturbances (verified-safe range) ---
@@ -207,21 +209,25 @@ function wrapPi(a) { a = (a + Math.PI) % (2 * Math.PI); if (a < 0) a += 2 * Math
 document.getElementById('shove-l').onclick = () => shove(-1)
 document.getElementById('shove-r').onclick = () => shove(1)
 document.getElementById('reset').onclick = () => sim.reset(startState())
-document.getElementById('retrain').onclick = retrain
+document.getElementById('retrain').onclick = toggleTraining
 document.getElementById('motor').onclick = () => { if (sim.armed) sim.disarm(); else sim.arm() }
 selPlant.onchange = () => { state.plantKey = selPlant.value; onPlantChange(); rebuild() }
 selCtrl.onchange = () => { state.ctrlKey = selCtrl.value; rebuild() }
 const selTarget = document.getElementById('sel-target')
 selTarget.onchange = () => {
   state.targetEq = +selTarget.value
-  // Live re-target: keep the current state and swap in the new equilibrium's
-  // controller, so the pole MOVES toward the new target rather than teleporting.
-  // Transitions toward a lower-energy state (e.g. back to hanging) complete
-  // smoothly; reaching a harder inverted state from far away may not be possible
-  // and the safety cutoff will catch the fall. "Reset near target" snaps to a
-  // clean hold when you want to see a specific balance state held.
-  currentController = buildController()
-  sim.setController(currentController)
+  if (state.ctrlKey === 'neural') {
+    // Goal-conditioned net: re-aim its target input and start near the new state
+    // (it's a balancer — it holds whichever target it's given).
+    currentController.setTarget(state.targetEq)
+    sim.reset(startState())
+  } else {
+    // LQR live re-target: keep the current state, swap the equilibrium's
+    // controller, so the pole moves toward the new target (energy-pump →
+    // catch). Lower-energy targets complete; inverted ones it keeps trying at.
+    currentController = buildController()
+    sim.setController(currentController)
+  }
   refreshNotes()
 }
 document.getElementById('toggle-real').onclick = () => {
@@ -365,7 +371,7 @@ function refreshNotes() {
       lqr: 'gains are solved live from the plant — the model is linearized about the target and the discrete Riccati equation is solved for optimal state feedback.',
       pid: 'inner PID holds the angle; an outer cascade loop leans the pole to recenter the cart. One SISO loop stabilizes one unactuated angle.',
       neural: state.plantKey === 'double'
-        ? 'a network (8→16→12→1, tanh) maps both links’ sin/cos, rates, and the cart state to motor force. Evolved by neuroevolution to BALANCE both-up and reject nudges (it does not swing the double up — that stays out of scope).'
+        ? 'a GOAL-CONDITIONED network (10→22→14→1, tanh): the target equilibrium is fed in as two inputs (±1 per link — up/down), so one network balances any of the four states — pick the target and it holds it. "Train continuously" keeps evolving it live (seeded from the current champion), hot-swapping in each improvement — it never caps out.'
         : 'a small network (5→12→8→1, tanh) maps [sinθ, cosθ, θ̇, x, ẋ] straight to motor force. No control law was written — it was evolved by neuroevolution (tournament selection + mutation, reusing the creatures engine), learning both swing-up and balance from a fitness score.',
       manual: 'no controller — you are the loop. Hold the arrow keys to push the cart and try to balance the pole yourself. Good for feeling how unstable it really is.',
     }[state.ctrlKey]],

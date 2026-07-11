@@ -8,7 +8,7 @@ export function evolve({
   paramCount, randomParams, mutate, evaluate,
   pop = 48, gens = 60, elite = 4, tournamentK = 3,
   mut = { rate: 0.14, strength: 0.3 },
-  seed = null, onProgress = null,
+  seed = null, onProgress = null, onChampion = null,
 }) {
   // Initial population: optional seed (a champion to refine) + random the rest.
   let population = []
@@ -22,7 +22,10 @@ export function evolve({
   for (let g = 0; g < gens; g++) {
     const scored = population.map(w => ({ w, f: evaluate(w) }))
     scored.sort((a, b) => b.f - a.f)
-    if (scored[0].f > best.fitness) best = { weights: new Float32Array(scored[0].w), fitness: scored[0].f, gen: g }
+    if (scored[0].f > best.fitness) {
+      best = { weights: new Float32Array(scored[0].w), fitness: scored[0].f, gen: g }
+      if (onChampion) onChampion(best) // fires only when the best improves (for live hot-swap / periodic save)
+    }
     const avg = scored.reduce((s, x) => s + x.f, 0) / scored.length
     history.push({ gen: g, best: scored[0].f, avg })
     if (onProgress) onProgress({ gen: g, gens, best: scored[0].f, avg })

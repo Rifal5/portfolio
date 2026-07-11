@@ -68,5 +68,34 @@ export function makeMLP(arch) {
     return params[L.wOffset + j * L.nIn + i]
   }
 
-  return { arch, paramCount: layout.total, layers: layout.layers, randomParams, mutate, forward, weightAt }
+  // One supervised gradient step (backprop) minimizing ½‖out − target‖² for a
+  // single sample; updates `params` in place and returns the squared error. Used
+  // to train by imitation (e.g. cloning an LQR). tanh derivative = 1 − a².
+  const delta = arch.map(n => new Float32Array(n))
+  function sgdStep(params, inputs, target, lr) {
+    forward(params, inputs) // fills `act`
+    const nL = layout.layers.length
+    const out = act[nL]
+    let loss = 0
+    for (let j = 0; j < out.length; j++) { const o = out[j]; delta[nL][j] = (o - target[j]) * (1 - o * o); loss += (o - target[j]) ** 2 }
+    for (let k = nL - 1; k >= 0; k--) {
+      const L = layout.layers[k], aPrev = act[k], d = delta[k + 1]
+      if (k >= 1) { // propagate error to the previous layer BEFORE updating weights
+        const dp = delta[k]
+        for (let i = 0; i < L.nIn; i++) {
+          let s = 0
+          for (let j = 0; j < L.nOut; j++) s += params[L.wOffset + j * L.nIn + i] * d[j]
+          dp[i] = s * (1 - aPrev[i] * aPrev[i])
+        }
+      }
+      for (let j = 0; j < L.nOut; j++) {
+        const base = L.wOffset + j * L.nIn, dj = d[j]
+        for (let i = 0; i < L.nIn; i++) params[base + i] -= lr * dj * aPrev[i]
+        params[L.bOffset + j] -= lr * dj
+      }
+    }
+    return loss
+  }
+
+  return { arch, paramCount: layout.total, layers: layout.layers, randomParams, mutate, forward, weightAt, sgdStep }
 }
