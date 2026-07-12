@@ -1,8 +1,9 @@
 import '../../styles/main.css'
 import { PLANTS } from './plants/index.js'
 import { CONTROLLERS } from './controllers/index.js'
-import { makeSingleSwingUp, makeDoubleSwingUp } from './controllers/energy.js'
-import { makeSim, SUBSTEP } from './sim.js'
+import { makeSingleSwingUp } from './controllers/energy.js'
+import { makeController as makeManeuver } from './controllers/maneuver.js'
+import { makeSim, SUBSTEP, REALISM } from './sim.js'
 import { render } from './render.js'
 import { renderNet } from './net-view.js'
 
@@ -120,7 +121,6 @@ function onPlantChange() {
     if (state.targetEq >= PLANTS.double.meta.equilibria.length) state.targetEq = 0
     st.value = state.targetEq
   }
-  document.getElementById('reset').textContent = isDouble ? '↺ Reset near target' : '↺ Drop from hanging'
 }
 
 // --- sim wiring ---
@@ -129,26 +129,24 @@ function buildController() {
   const c = CONTROLLERS[state.ctrlKey]
   if (plant.meta.name === 'double') {
     if (state.ctrlKey === 'lqr') {
-      // Proper basin + energy-pumping transition (double dims: theta1=1, theta2=2,
-      // theta1dot=4, theta2dot=5). LQR engages only inside the target basin;
-      // outside it, the swing-up phase actively drives toward the target (it
-      // reliably reaches the lower-energy targets; inverted ones are hard).
-      const enter = e => Math.abs(e[1]) < 0.35 && Math.abs(e[2]) < 0.35 && Math.abs(e[4]) < 2.5 && Math.abs(e[5]) < 2.5
-      const exit = e => Math.abs(e[1]) > 0.6 || Math.abs(e[2]) > 0.6 || Math.abs(e[4]) > 4.5 || Math.abs(e[5]) > 4.5
-      return c.make(plant, { targetEq: state.targetEq, swingUp: makeDoubleSwingUp(plant, state.targetEq), enter, exit })
+      // Maneuver supervisor: precomputed iLQR swing-up trajectories tracked with
+      // time-varying LQR gains, chained through hanging, static LQR catch. This
+      // is what makes every target reachable from anywhere. In realistic mode it
+      // lead-compensates the known actuator lag in the feedforward.
+      return makeManeuver(plant, { targetEq: state.targetEq, actuatorTau: state.realistic ? REALISM.actuator.tau : 0 })
     }
     return c.make(plant, { targetEq: state.targetEq }) // goal-conditioned neural
   }
   const swing = SWINGUPS[state.plantKey]
   return c.make(plant, swing ? { swingUp: swing(plant) } : {})
 }
-// Where the pole starts: the single drops from hanging (to show swing-up); the
-// double starts near its target equilibrium so it can be held (neural balances
-// both-up only). Global swing-up of the double is out of scope.
+// Where the pole starts: LQR modes drop from hanging (they genuinely swing up);
+// the neural double starts near its target (it's a balancer, not a maneuverer).
 function startState() {
   if (state.ctrlKey === 'manual') return plant.initialState() // start at rest; you drive
   if (plant.meta.name !== 'double') return plant.initialState()
-  const eq = plant.fromVec(plant.meta.equilibria[state.targetEq].x) // start near the selected target
+  if (state.ctrlKey === 'lqr') return plant.initialState()    // hanging; supervisor swings up
+  const eq = plant.fromVec(plant.meta.equilibria[state.targetEq].x)
   return { ...eq, theta1: eq.theta1 + 0.1, theta2: eq.theta2 - 0.1, x: 0 }
 }
 let currentController
@@ -157,6 +155,9 @@ function rebuild() {
   currentController = buildController()
   sim = makeSim({ plant, controller: currentController, realistic: state.realistic, autoTrip: state.ctrlKey !== 'manual' })
   sim.reset(startState())
+  // Neural double is a balancer (starts near target); everything else drops from hanging.
+  document.getElementById('reset').textContent =
+    (plant.meta.name === 'double' && state.ctrlKey === 'neural') ? '↺ Reset near target' : '↺ Drop from hanging'
   document.getElementById('neural-panel').style.display = state.ctrlKey === 'neural' ? '' : 'none'
   document.getElementById('sel-target').disabled = false // enabled for both LQR and (goal-conditioned) neural
   if (state.ctrlKey !== 'neural') stopTraining() // continuous training only makes sense for neural
@@ -222,9 +223,9 @@ selTarget.onchange = () => {
     currentController.setTarget(state.targetEq)
     sim.reset(startState())
   } else {
-    // LQR live re-target: keep the current state, swap the equilibrium's
-    // controller, so the pole moves toward the new target (energy-pump →
-    // catch). Lower-energy targets complete; inverted ones it keeps trying at.
+    // LQR live re-target: keep the current state, swap in the new target's
+    // supervisor — it chains descend → settle at hanging → tracked swing-up →
+    // catch, so every target is reachable from wherever the pole is now.
     currentController = buildController()
     sim.setController(currentController)
   }
@@ -233,6 +234,8 @@ selTarget.onchange = () => {
 document.getElementById('toggle-real').onclick = () => {
   state.realistic = !state.realistic
   sim.realistic = state.realistic
+  // The maneuver supervisor compensates the actuator model only when it exists.
+  currentController.setActuatorTau?.(state.realistic ? REALISM.actuator.tau : 0)
   paintToggle(); refreshNotes()
 }
 const heldKeys = new Set()
@@ -271,6 +274,9 @@ const MODE_STYLE = {
   reach: { bg: '#f59e0b18', color: '#f59e0b', label: '◐ Reaching' },
   'swing-up': { bg: '#f59e0b18', color: '#f59e0b', label: '◐ Swinging up' },
   'kick-start': { bg: '#f59e0b18', color: '#f59e0b', label: '◐ Kick-starting' },
+  maneuver: { bg: '#06b6d418', color: '#06b6d4', label: '◈ Maneuvering (trajectory)' },
+  descend: { bg: '#f59e0b18', color: '#f59e0b', label: '↓ Descending to hanging' },
+  settle: { bg: '#33415518', color: '#94a3b8', label: '· Settling for launch' },
   manual: { bg: '#33415518', color: '#94a3b8', label: '○ Manual — you drive' },
   init: { bg: '#33415518', color: '#94a3b8', label: '○ Idle' },
 }
@@ -377,7 +383,7 @@ function refreshNotes() {
     }[state.ctrlKey]],
   ]
   if (state.plantKey === 'double') {
-    common.push(['Four equilibria', 'each link is up (0) or down (π), giving four balance states. A per-equilibrium LQR holds any of them from nearby — even both-up, the hardest. Changing the target runs an energy-pumping transition toward it, then the LQR catches it when it enters the basin (mode shows swing-up → balancing). It reliably reaches the lower-energy targets; energy pumping fixes total energy but can’t pin which of the many same-energy configurations you land in, so reaching an inverted state from far away is a research problem it keeps trying at rather than always achieving. "Reset near target" snaps to a clean hold.'])
+    common.push(['Four equilibria, real transitions', 'each link is up (0) or down (π), giving four balance states — and the controller can now move between ALL of them. Swing-up trajectories were computed offline by trajectory optimization (iLQR) and are tracked at runtime with time-varying LQR gains, then the static LQR catches at the top — the two-degrees-of-freedom design used on real double/triple pendulum rigs (Graichen 2007, Glück 2013). Transitions route through hanging (descend → settle → launch), because direct inverted-to-inverted hops are beyond classical control. Watch the mode badge: descending → settling → maneuvering → balancing.'])
   }
   const realism = state.realistic
     ? ['Realistic loop', 'positions read through noisy, quantized encoders (no velocity sensor); an Extended Kalman Filter reconstructs the full state (grey ghost); the command passes through a saturating, slew- and lag-limited actuator. The controller acts on the estimate — so it jitters and works harder, like real hardware.']

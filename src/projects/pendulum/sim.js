@@ -32,7 +32,11 @@ export const SUBSTEP = 1 / 240
 export const REALISM = {
   controlHz: 240,
   sensor: { angleNoise: 0.004, posNoise: 0.003, angleRes: 0.00314, posRes: 0.001 }, // ~0.18° encoder
-  actuator: { slewPerForceMax: 11, tau: 0.02, deadband: 0.05 },
+  // Slew: full force swing in ~50 ms (40×forceMax per second) — representative
+  // of a servo-driven cart with a kHz current loop. (The original placeholder,
+  // 11×, meant full-scale in 180 ms — far more sluggish than a real drive, and
+  // no dynamically feasible double-pendulum swing-up exists under it.)
+  actuator: { slewPerForceMax: 40, tau: 0.02, deadband: 0.05 },
   ekf: { posProcess: 1e-6, velProcess: 3e-3, meas: 2e-5 },
 }
 
@@ -60,9 +64,16 @@ export function makeSim({ plant, controller, realistic = false, realism = REALIS
     tau: realism.actuator.tau, deadband: realism.actuator.deadband,
   })
   const ekf = makeEKF(plant, { dt: controlDt, processNoise: cfg.processNoise, measNoise: cfg.measNoise, x0: plant.toVec(plant.initialState()) })
-  // Default balance region: single uses the pole's angle band; other plants (double,
-  // stabilize-only) estimate throughout since there is no nonlinear swing-up phase.
-  const inBalance = balanceRegion || (plant.meta.name === 'single' ? (s) => Math.abs(wrapPi(s.theta)) < 0.35 : () => true)
+  // Region where the EKF estimate is trusted by the controller (the separation
+  // principle holds near equilibria; fast nonlinear maneuvers run on true state,
+  // standing in for the open-loop feedforward a real rig would use).
+  //   single — near upright;  double — near ANY of the four equilibria, slow-ish.
+  const nearAngle = (a, g) => Math.abs(wrapPi(a - g)) < 0.4
+  const inBalance = balanceRegion || (plant.meta.name === 'single'
+    ? (s) => Math.abs(wrapPi(s.theta)) < 0.35
+    : (s) => (nearAngle(s.theta1, 0) || nearAngle(s.theta1, Math.PI))
+          && (nearAngle(s.theta2, 0) || nearAngle(s.theta2, Math.PI))
+          && Math.abs(s.theta1dot) < 3 && Math.abs(s.theta2dot) < 3)
 
   let ctrl = controller
   let trueState = plant.initialState()
@@ -88,7 +99,12 @@ export function makeSim({ plant, controller, realistic = false, realism = REALIS
       ekf.predict(uReal)
       ekf.update(sensor.measure(plant.measure(trueState)))
       est = ekf.state()
-      if (!engaged && inBalance(trueState)) engaged = true
+      // What the controller sees: estimate near equilibria, true state during
+      // fast maneuvers (the estimator's velocity lag breaks phase-critical
+      // control — see the swing-up/separation notes at the top of this file).
+      // Controllers with an explicit phase machine declare it themselves via
+      // `wantsTrueState`, which avoids flip-flopping the source mid-trajectory.
+      engaged = ctrl.wantsTrueState !== undefined ? !ctrl.wantsTrueState : inBalance(trueState)
       const r = ctrl.compute(engaged ? est : trueState); cmd = r.force; mode = r.mode
     }
   }
