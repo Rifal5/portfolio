@@ -1,12 +1,14 @@
-// Generate the double pendulum's transition-maneuver library — SLEW-CONSTRAINED.
-// For each inverted target, solve the swing-up from hanging via iLQR on an
-// augmented state z = [x, th1, th2, xd, th1d, th2d, u], where the control is the
-// force INCREMENT per knot: uMax then IS the actuator slew limit (hard), and the
-// force magnitude is clamped inside the step. Each candidate is verified on the
-// REAL plant through the REAL actuator model (slew + first-order lag + deadband,
-// with runtime lead compensation), in both ideal and realistic-actuator loops,
-// including perturbed starts. Verified trajectories + TVLQR gains are saved to
-// src/projects/pendulum/maneuvers-double.js.
+// Generate the double pendulum's FULL transition-maneuver graph — every ordered
+// pair of equilibria, solved DIRECTLY (no routing through hanging) via iLQR on
+// an augmented state z = [x, th1, th2, xd, th1d, th2d, u], where the control is
+// the force INCREMENT per knot: uMax then IS the actuator slew limit (hard),
+// and the force magnitude is clamped inside the step. Each candidate is
+// verified on the REAL plant through the REAL actuator model (slew + lag +
+// deadband, with runtime lead compensation), in both ideal and realistic loops,
+// from perturbed starts around the SOURCE equilibrium (the balance-jitter
+// envelope). Verified trajectories + TVLQR gains are saved to
+// src/projects/pendulum/maneuvers-double.js; pairs that fail to verify are
+// simply omitted (the runtime supervisor falls back to routing via hanging).
 
 import * as dbl from '../src/projects/pendulum/plants/double.js'
 import { ilqr } from '../src/lib/control/ilqr.js'
@@ -34,7 +36,9 @@ const stepFn = (z, w) => {
   const xn = rk4(dbl.derivative, z.slice(0, 6), u, DT, P)
   return [...xn, u]
 }
-const z0 = [0, Math.PI, Math.PI, 0, 0, 0, 0]
+// Unwrapped angle of an equilibrium description (0 = up, π = down).
+const eqAngles = eq => [dbl.meta.equilibria[eq].x[1] === 0 ? 0 : Math.PI, dbl.meta.equilibria[eq].x[2] === 0 ? 0 : Math.PI]
+const z0For = src => { const [a1, a2] = eqAngles(src); return [0, a1, a2, 0, 0, 0, 0] }
 
 const W = { ang: 900, rate: 120, x: 60, xd: 60, uEnd: 0.5 }
 const R = { u: 8e-4, dw: 1e-3, shape: 1.5, x: 0.5, wall: 4000 }
@@ -133,13 +137,15 @@ function tvlqrGains(xs, us) {
 
 // Verify tracking + catch on the real plant. mode 'ideal' = perfect actuator;
 // mode 'real' = through makeActuator(slew+lag+deadband) with lead compensation.
-function verify(traj, targetEq, mode) {
-  const Klqr = lqrForEquilibrium(dbl, targetEq, Qw, 0.02, SUB).K
+// Perturbed starts are around the SOURCE equilibrium (balance-jitter envelope).
+function verify(traj, srcEq, targetEq, mode) {
+  const Klqr = lqrForEquilibrium(dbl, targetEq, Qw, 0.1, SUB).K
   const eq = dbl.meta.equilibria[targetEq].x
+  const [a1, a2] = eqAngles(srcEq)
   const starts = [
-    { x: 0, theta1: Math.PI, theta2: Math.PI, xdot: 0, theta1dot: 0, theta2dot: 0 },
-    { x: 0.05, theta1: Math.PI + 0.05, theta2: Math.PI - 0.04, xdot: 0, theta1dot: 0.05, theta2dot: -0.05 },
-    { x: -0.06, theta1: Math.PI - 0.06, theta2: Math.PI + 0.05, xdot: 0.05, theta1dot: -0.06, theta2dot: 0.04 },
+    { x: 0, theta1: a1, theta2: a2, xdot: 0, theta1dot: 0, theta2dot: 0 },
+    { x: 0.05, theta1: a1 + 0.05, theta2: a2 - 0.04, xdot: 0, theta1dot: 0.05, theta2dot: -0.05 },
+    { x: -0.06, theta1: a1 - 0.06, theta2: a2 + 0.05, xdot: 0.05, theta1dot: -0.06, theta2dot: 0.04 },
   ]
   for (const start of starts) {
     let s = { ...start }
@@ -166,14 +172,14 @@ function verify(traj, targetEq, mode) {
   return true
 }
 
-// Warm starts: increments from the previous (unconstrained) library if present,
-// plus decaying sinusoids.
-function initsFor(targetEq) {
+// Warm starts: increments from the previous library if present, plus decaying
+// sinusoids at several frequencies/amplitudes (symmetry breakers).
+function initsFor(srcEq, targetEq) {
   const inits = []
   try {
     // eslint-disable-next-line
     const prev = JSON.parse(fs.readFileSync('src/projects/pendulum/maneuvers-double.js', 'utf8').replace(/^[\s\S]*?export const MANEUVERS = /, '').trim())
-    const m = prev[`3>${targetEq}`]
+    const m = prev[`${srcEq}>${targetEq}`]
     if (m) {
       const ws = []
       let uPrev = 0
@@ -185,7 +191,7 @@ function initsFor(targetEq) {
       inits.push({ name: 'warm (prev lib)', ws })
     }
   } catch { /* no previous library */ }
-  for (const hz of [0.5, 0.9, 0.7]) for (const A of [8, 16]) {
+  for (const hz of [0.5, 0.9, 0.7]) for (const A of [8, 16, 4]) {
     // sinusoid FORCE profile expressed as increments
     const ws = []; let uPrev = 0
     for (let t = 0; t < N; t++) {
@@ -199,13 +205,16 @@ function initsFor(targetEq) {
 }
 
 const OUT = {}
-let allOk = true
-for (const targetEq of [0, 1, 2]) {
-  console.log(`\n=== dd -> ${dbl.meta.equilibria[targetEq].label} (eq ${targetEq}) ===`)
+const failed = []
+const PAIRS = []
+for (let s = 0; s < 4; s++) for (let d = 0; d < 4; d++) if (s !== d) PAIRS.push([s, d])
+for (const [srcEq, targetEq] of PAIRS) {
+  console.log(`\n=== ${dbl.meta.equilibria[srcEq].label} -> ${dbl.meta.equilibria[targetEq].label} (${srcEq}>${targetEq}) ===`)
   const eq = dbl.meta.equilibria[targetEq].x
-  const { terminal, running } = makeCosts(eq[1] === 0 ? 0 : Math.PI, eq[2] === 0 ? 0 : Math.PI)
+  const z0 = z0For(srcEq)
+  const { terminal, running } = makeCosts(...eqAngles(targetEq))
   let bestClean = null, bestTraj = null
-  for (const init of initsFor(targetEq)) {
+  for (const init of initsFor(srcEq, targetEq)) {
     const t0 = Date.now()
     // Constraint homotopy: hard clamping hurts iLQR convergence, so solve with a
     // loose slew limit first, then re-solve warm-started at the true limit, then
@@ -221,35 +230,42 @@ for (const targetEq of [0, 1, 2]) {
     const e1 = wrap(xf[1] - eq[1]), e2 = wrap(xf[2] - eq[2])
     const near = Math.abs(e1) < 0.12 && Math.abs(e2) < 0.12 && maxX < 2.2
     let ideal = false, real = false
-    if (near) { ideal = verify(traj, targetEq, 'ideal'); real = ideal && verify(traj, targetEq, 'real') }
+    if (near) { ideal = verify(traj, srcEq, targetEq, 'ideal'); real = ideal && verify(traj, srcEq, targetEq, 'real') }
     console.log(`  ${init.name.padEnd(15)} cost=${sol.cost.toFixed(2).padStart(9)} thF=[${e1.toFixed(2)}, ${e2.toFixed(2)}] rates=[${xf[4].toFixed(1)}, ${xf[5].toFixed(1)}] maxX=${maxX.toFixed(2)} maxDu=${maxDu.toFixed(0)} ideal=${ideal} real=${real} (${((Date.now() - t0) / 1000).toFixed(0)}s)`)
     if (ideal && real && (!bestClean || sol.cost < bestClean.cost)) { bestClean = sol; bestTraj = traj }
     if (bestClean) break // first verified solution is good enough
   }
-  if (!bestTraj) { allOk = false; console.log('  FAILED: no verified slew-feasible trajectory'); continue }
+  if (!bestTraj) { failed.push(`${srcEq}>${targetEq}`); console.log('  NOT VERIFIED — omitted (runtime falls back to routing via hanging)'); continue }
   console.log(`  SOLVED cost=${bestClean.cost.toFixed(2)}`)
-  OUT[`3>${targetEq}`] = {
+  OUT[`${srcEq}>${targetEq}`] = {
     dt: DT,
-    xs: bestTraj.xs.map(x => x.map(v => +v.toFixed(4))),
-    us: bestTraj.us.map(u => +u.toFixed(3)),
-    Ks: bestTraj.Ks.map(K => K.map(v => +v.toFixed(3))),
+    xs: bestTraj.xs.map(x => x.map(v => +v.toFixed(3))),
+    us: bestTraj.us.map(u => +u.toFixed(2)),
+    Ks: bestTraj.Ks.map(K => K.map(v => +v.toFixed(2))),
   }
 }
 
+// The three from-hanging swing-ups are load-bearing (the universal fallback
+// route); everything else is an optimization.
+const allOk = ['3>0', '3>1', '3>2'].every(k => OUT[k])
+console.log(`\nverified pairs: ${Object.keys(OUT).join(', ')}${failed.length ? '  |  failed: ' + failed.join(', ') : ''}`)
 if (allOk) {
-  const body = `// Auto-generated by scratchpad/gen-maneuvers.mjs — verified swing-up maneuvers
-// for the double pendulum: iLQR feedforward trajectories + time-varying LQR
-// gains (Graichen/Glück-style 2-DOF design), optimized with the actuator's
-// slew limit as a HARD constraint and verified through the full actuator model
-// (slew + lag + deadband, with lead compensation) as well as an ideal loop.
-// Keyed 'srcEq>dstEq' (0=up-up 1=up-down 2=down-up 3=down-down); all start from
-// hanging at rest — other sources route through hanging at runtime.
+  const body = `// Auto-generated by scratchpad/gen-maneuvers.mjs — the double pendulum's
+// verified transition-maneuver GRAPH: direct iLQR feedforward trajectories +
+// time-varying LQR gains (Graichen/Glück-style 2-DOF design) between
+// equilibria, optimized with the actuator's slew limit as a HARD constraint
+// and verified through the full actuator model (slew + lag + deadband, with
+// lead compensation) as well as an ideal loop, from perturbed starts around
+// the source. Keyed 'srcEq>dstEq' (0=up-up 1=up-down 2=down-up 3=down-down);
+// each starts at the source equilibrium AT REST — the supervisor launches them
+// straight out of a balanced hold. Pairs that failed verification are absent
+// (the supervisor routes those via hanging).
 // Entry: { dt, xs[N+1][6], us[N], Ks[N][6] }, state [x, th1, th2, xd, th1d, th2d].
 export const MANEUVERS = ${JSON.stringify(OUT)}
 `
   fs.writeFileSync('src/projects/pendulum/maneuvers-double.js', body)
-  console.log(`\nSAVED maneuvers-double.js (${(body.length / 1024).toFixed(0)} KB)`)
+  console.log(`SAVED maneuvers-double.js (${(body.length / 1024).toFixed(0)} KB, ${Object.keys(OUT).length}/12 pairs)`)
 } else {
-  console.log('\nNOT saved — at least one target failed')
+  console.log('NOT saved — a load-bearing from-hanging swing-up failed')
   process.exit(1)
 }

@@ -3,19 +3,22 @@
 // design from the literature (Graichen 2007, Glück 2013):
 //
 //   balance   in the target's basin, a static LQR holds it (hysteresis switch).
-//   maneuver  a precomputed iLQR swing-up trajectory is tracked with its
-//             time-varying LQR gains (feedforward + TVLQR). Trajectories start
-//             from hanging at rest (maneuvers-double.js, verified offline).
-//   descend   from anywhere else, pump energy DOWN toward hanging — the one
-//             transition that's always easy.
-//   settle    near hanging, the down-down LQR actively damps the last of the
-//             swing until the state is inside the maneuver's verified launch
-//             window, then the maneuver fires.
+//   maneuver  a precomputed iLQR trajectory is tracked with its time-varying
+//             LQR gains (feedforward + TVLQR). The library holds DIRECT
+//             equilibrium-to-equilibrium trajectories, each starting at its
+//             source AT REST — so a re-target fires straight out of a balanced
+//             hold, no detour. (maneuvers-double.js, verified offline.)
+//   descend   when lost mid-air (or a pair has no verified direct trajectory),
+//             pump energy down toward hanging — the always-easy transition.
+//   settle    near hanging, the down-down LQR damps the swing into the verified
+//             launch window, then the from-hanging maneuver fires.
 //
-// So a target change becomes: current state → descend → settle at hanging →
-// tracked swing-up → LQR catch. Chaining through hanging is what makes every
-// transition reliable — direct inverted-to-inverted hops stay out of reach of
-// classical control (see the reachability experiments in the Jira log).
+// So a target change is: launch the direct trajectory if one starts where we
+// are; otherwise current state → hanging → swing-up → catch. NOTE the launch
+// gate is on the full STATE, not the shape: mid-flight the system passes
+// through configurations that LOOK like equilibria, but with the links moving
+// several rad/s they are far outside any catch basin — that's why launches
+// happen from rest, not opportunistically mid-swing.
 
 import { lqrForEquilibrium } from '../../../lib/control/linearize.js'
 import { makeDoubleSwingUp } from './energy.js'
@@ -40,24 +43,37 @@ export function makeController(plant, opts = {}) {
   let actuatorTau = opts.actuatorTau || 0
   const p = plant.PARAMS, fMax = p.forceMax
   const Q = Q_WEIGHTS.map((w, i, A) => A.map((_, j) => (i === j ? w : 0)))
-  const eqT = plant.meta.equilibria[targetEq].x
-  const eqD = plant.meta.equilibria[DOWN].x
+  const eqs = plant.meta.equilibria
+  const eqT = eqs[targetEq].x
+  const eqD = eqs[DOWN].x
   const Ktarget = lqrForEquilibrium(plant, targetEq, Q, BALANCE_R, controlDt).K
   const Kdown = targetEq === DOWN ? Ktarget : lqrForEquilibrium(plant, DOWN, Q, BALANCE_R, controlDt).K
-  const traj = targetEq === DOWN ? null : MANEUVERS[`${DOWN}>${targetEq}`]
   const pumpDown = makeDoubleSwingUp(plant, DOWN)
 
   const errTo = (s, eq) => [s.x - eq[0], wrap(s.theta1 - eq[1]), wrap(s.theta2 - eq[2]), s.xdot, s.theta1dot, s.theta2dot]
   const inBasin = e => Math.abs(e[1]) < 0.35 && Math.abs(e[2]) < 0.35 && Math.abs(e[4]) < 2.5 && Math.abs(e[5]) < 2.5
   const outOfBasin = e => Math.abs(e[1]) > 0.6 || Math.abs(e[2]) > 0.6 || Math.abs(e[4]) > 4.5 || Math.abs(e[5]) > 4.5
-  // Launch window = the perturbation envelope the trajectories were verified for.
+  // Launch window = the perturbation envelope the trajectories were verified for
+  // (angles AND rates AND cart — being at rest is what makes a launch valid).
   const readyToLaunch = e => Math.abs(e[0]) < 0.07 && Math.abs(e[1]) < 0.06 && Math.abs(e[2]) < 0.06
     && Math.abs(e[3]) < 0.07 && Math.abs(e[4]) < 0.07 && Math.abs(e[5]) < 0.07
 
   let phase = 'descend'   // descend | settle | maneuver | balance
+  let traj = null         // active maneuver trajectory
   let tM = 0              // maneuver clock (s)
 
   const lqrForce = (e, K) => Math.max(-fMax, Math.min(fMax, -K.reduce((a, k, j) => a + k * e[j], 0)))
+
+  // If the state sits at rest at some equilibrium with a verified direct
+  // trajectory to the target, return that trajectory.
+  function directLaunch(s) {
+    for (let src = 0; src < eqs.length; src++) {
+      if (src === targetEq) continue
+      const m = MANEUVERS[`${src}>${targetEq}`]
+      if (m && readyToLaunch(errTo(s, eqs[src].x))) return m
+    }
+    return null
+  }
 
   function trackForce(s) {
     const N = traj.us.length
@@ -79,6 +95,8 @@ export function makeController(plant, opts = {}) {
     return Math.max(-fMax, Math.min(fMax, u))
   }
 
+  function startManeuver(m) { traj = m; tM = 0; phase = 'maneuver' }
+
   function compute(s) {
     const eT = errTo(s, eqT)
     // Basin capture always wins (with hysteresis while balancing).
@@ -91,13 +109,6 @@ export function makeController(plant, opts = {}) {
       return { force: lqrForce(eT, Ktarget), mode: 'balance' }
     }
 
-    if (targetEq === DOWN) {
-      // Hanging is reachable from anywhere: pump down, then the basin check
-      // above hands off to the down-down LQR.
-      return { force: Math.max(-fMax, Math.min(fMax, pumpDown(s).force)), mode: 'descend' }
-    }
-
-    const eD = errTo(s, eqD)
     if (phase === 'maneuver') {
       tM += controlDt
       if (tM >= traj.us.length * traj.dt) {
@@ -106,8 +117,25 @@ export function makeController(plant, opts = {}) {
       }
       return { force: trackForce(s), mode: 'maneuver' }
     }
+
+    // Direct launch: at rest at an equilibrium that has a verified trajectory
+    // straight to the target (e.g. re-target while balanced) — fire it now.
+    const direct = directLaunch(s)
+    if (direct) { startManeuver(direct); return { force: trackForce(s), mode: 'maneuver' } }
+
+    if (targetEq === DOWN) {
+      // No direct trajectory applies: pump down; the basin check above hands
+      // off to the down-down LQR.
+      return { force: Math.max(-fMax, Math.min(fMax, pumpDown(s).force)), mode: 'descend' }
+    }
+
+    const eD = errTo(s, eqD)
     if (phase === 'settle') {
-      if (readyToLaunch(eD)) { phase = 'maneuver'; tM = 0; return { force: trackForce(s), mode: 'maneuver' } }
+      if (readyToLaunch(eD)) {
+        const m = MANEUVERS[`${DOWN}>${targetEq}`]
+        startManeuver(m)
+        return { force: trackForce(s), mode: 'maneuver' }
+      }
       if (outOfBasin(eD)) { phase = 'descend' }
       else return { force: lqrForce(eD, Kdown), mode: 'settle' }
     }
@@ -118,7 +146,7 @@ export function makeController(plant, opts = {}) {
 
   return {
     compute,
-    reset() { phase = 'descend'; tM = 0 },
+    reset() { phase = 'descend'; traj = null; tM = 0 },
     setActuatorTau(t) { actuatorTau = t || 0 },
     // Fast phases must run on the true state (feedforward convention — an EKF's
     // velocity lag breaks phase-critical tracking, and flip-flopping the state
@@ -127,7 +155,7 @@ export function makeController(plant, opts = {}) {
     get wantsTrueState() { return phase === 'maneuver' || phase === 'descend' },
     get balancing() { return phase === 'balance' },
     get info() {
-      return { type: 'lqr', dims: plant.meta.dims, K: Ktarget, weights: Q_WEIGHTS, R: BALANCE_R, eq: plant.meta.equilibria[targetEq].label, phase }
+      return { type: 'lqr', dims: plant.meta.dims, K: Ktarget, weights: Q_WEIGHTS, R: BALANCE_R, eq: eqs[targetEq].label, phase }
     },
   }
 }
