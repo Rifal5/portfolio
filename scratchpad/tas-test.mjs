@@ -85,6 +85,37 @@ let bestSeed = null, closest = 9
   }
 }
 
+// 4) the catch probe is TRUTHFUL across the genuinely non-monotonic down-up
+// basin: probe verdict must equal what the LQR actually does, at every rate —
+// including the 1.5 rad/s dip that the old angle/rate threshold got wrong.
+{
+  const mk = () => makeController(dbl, { controlDt: SUB })
+  const stateAt = w2 => ({ x: 0, xdot: 0, theta1: Math.PI, theta2: 0.12, theta1dot: 0, theta2dot: w2 })
+  const probeGreen = st => { const c = mk(); c.play(st); c.compute(st); return c.probe().catchable }
+  // ground truth: engage and run the real loop; a CLEAN catch settles within 3 s
+  // without a big swing-out or hitting the wall (a 6 s near-wall thrash is NOT a
+  // clean catch — that's the 'goes all over the place' the user reported).
+  function cleanHold(st) {
+    const c = mk(); c.engageBalance(st); let s = st, peak = 0
+    for (let i = 0; i < Math.round(3 / SUB); i++) {
+      const r = c.compute(s); s = dbl.step(s, r.force, SUB)
+      peak = Math.max(peak, Math.abs(wrap(s.theta2)), Math.abs(wrap(s.theta1 - Math.PI)))
+      if (Math.abs(s.x) > 2.3) return false
+    }
+    return Math.abs(wrap(s.theta2)) < 0.06 && Math.abs(wrap(s.theta1 - Math.PI)) < 0.06 && peak < 0.9
+  }
+  let allMatch = true
+  const t0 = Date.now(); let probes = 0
+  for (const w2 of [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]) {
+    const st = stateAt(w2), g = probeGreen(st), h = cleanHold(st); probes++
+    const match = g === h
+    if (!match) allMatch = false
+    console.log(`   w2=${w2}: probe=${g ? 'GREEN' : 'red  '} clean-catch=${h ? 'yes ' : 'no  '} ${match ? '✓' : '✗ MISMATCH'}`)
+  }
+  console.log(`4) probe matches clean-catch reality: ${allMatch ? 'YES' : 'NO'}  [old threshold said GREEN for all — the bug]  ~${((Date.now() - t0) / probes / 2).toFixed(1)}ms/probe`)
+  if (!allMatch) ok = false
+}
+
 if (bestSeed) console.log('\nSEED SCRIPT (single):', JSON.stringify(bestSeed.script))
-console.log(ok ? '\nPASS: TAS playback deterministic, scripted swing-up catches, engage holds all equilibria' : '\nFAIL')
+console.log(ok ? '\nPASS: TAS playback deterministic, scripted swing-up catches, engage holds, catch probe is truthful' : '\nFAIL')
 process.exit(ok ? 0 : 1)

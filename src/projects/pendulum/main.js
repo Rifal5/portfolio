@@ -477,8 +477,8 @@ function updateTasReadout() {
   const good = info.catchable
   el.innerHTML = `Nearest: <span style="color:#e2e8f0;">${info.nearestLabel}</span> · ${ang}°, ${info.rateErr.toFixed(1)} rad/s<br>`
     + (good
-      ? `<span style="color:#22c55e;font-weight:600;">✓ catchable — engage now</span>`
-      : `<span style="color:#64748b;">not catchable yet — get the links near an equilibrium, slow</span>`)
+      ? `<span style="color:#22c55e;font-weight:600;">✓ clean catch — engage now</span>`
+      : `<span style="color:#64748b;">no clean catch here — closer &amp; slower (checked by simulating the catch)</span>`)
 }
 
 function refreshNotes() {
@@ -491,7 +491,7 @@ function refreshNotes() {
         ? 'a GOAL-CONDITIONED network (10→22→14→1, tanh): the target equilibrium is fed in as two inputs (±1 per link — up/down), so one network balances any of the four states — pick the target and it holds it. "Train continuously" keeps evolving it live (seeded from the current champion), hot-swapping in each improvement — it never caps out.'
         : 'a small network (5→12→8→1, tanh) maps [sinθ, cosθ, θ̇, x, ẋ] straight to motor force. No control law was written — it was evolved by neuroevolution (tournament selection + mutation, reusing the creatures engine), learning both swing-up and balance from a fitness score.',
       manual: 'no controller — you are the loop. Hold the arrow keys to push the cart and try to balance the pole yourself. Good for feeling how unstable it really is.',
-      tas: 'tool-assisted: you author a timeline of open-loop force steps and Play them back deterministically — the motor does exactly what you scripted, no feedback, so the same script always gives the same motion (like a tool-assisted speedrun). Hunt for a swing-up, then Engage balance (or tick auto-catch) to hand off to an LQR that catches the NEAREST equilibrium — but only if you brought the links close and slow; the readout tells you when it is catchable. Seeded with a pump that already works — edit it and find your own.',
+      tas: 'tool-assisted: you author a timeline of open-loop force steps and Play them back deterministically — the motor does exactly what you scripted, no feedback, so the same script always gives the same motion (like a tool-assisted speedrun). Note that coasting (0 N) is a real move: the optimal machine trajectories spend ~25% of their time at zero force, letting the links swing free — the seed scripts use it too. Hunt for a swing-up, then Engage balance (or tick auto-catch) to hand off to an LQR catch. The “clean catch” light is not a threshold — it actually simulates the catch forward and lights green only if it truly settles cleanly (the region of attraction round these unstable equilibria is genuinely fractal — close-and-slow is necessary but not sufficient, which is why a naïve nearness check would lie). Seeded with a pump that already works — edit it and find your own.',
     }[state.ctrlKey]],
   ]
   if (state.plantKey === 'double') {
