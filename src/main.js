@@ -32,7 +32,7 @@ const projects = [
     id: 'pendulum',
     title: 'Self-Righting Pendulum',
     tag: 'Control Theory',
-    description: 'Single and double cart-pole. Balance with LQR, cascade PID, or a neural net — and the double genuinely swings up and transitions between all four equilibria via optimized trajectories (iLQR + TVLQR). Realistic mode adds noisy encoders, an EKF, and actuator lag — engineering-grade, not just an animation.',
+    description: 'Single and double cart-pole. Balance with LQR, cascade PID, or a neural net; the double genuinely swings up and transitions between all four equilibria via optimized trajectories (iLQR + TVLQR); or go TAS — script your own open-loop swing-up and catch it. Realistic mode adds noisy encoders, an EKF, and actuator lag — engineering-grade, not just an animation.',
     tech: ['iLQR trajectories', 'TVLQR', 'LQG / Kalman', 'Neuroevolution'],
     href: `${import.meta.env.BASE_URL}src/projects/pendulum/index.html`,
     color: '#06b6d4',

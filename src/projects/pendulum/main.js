@@ -10,7 +10,14 @@ import { renderNet } from './net-view.js'
 // Per-plant swing-up laws (the double's is added in Phase 5).
 const SWINGUPS = { single: makeSingleSwingUp }
 
-const state = { plantKey: 'single', ctrlKey: 'lqr', realistic: false, targetEq: 0 }
+const state = { plantKey: 'single', ctrlKey: 'lqr', realistic: false, targetEq: 0, tasScript: null }
+
+// Working seed scripts (found + verified headlessly in scratchpad/tas-test.mjs):
+// alternating full-force pulses that pump the pole up to a catchable state.
+const TAS_SEEDS = {
+  single: [0.62, 0.62, 0.62, 0.62, 0.62, 0.62].map((d, k) => ({ force: (k % 2 ? -1 : 1) * 11, dur: d })),
+  double: Array.from({ length: 12 }, (_, k) => ({ force: (k % 2 ? -1 : 1) * 21, dur: 0.18 })),
+}
 
 document.querySelector('#app').innerHTML = `
 <div style="display:flex;flex-direction:column;height:100vh;">
@@ -72,6 +79,25 @@ document.querySelector('#app').innerHTML = `
         <button id="retrain" class="btn btn-ghost" style="width:100%;font-size:0.75rem;padding:0.4rem;">⟳ Train continuously</button>
         <p id="train-status" style="font-size:0.68rem;color:#64748b;margin-top:0.5rem;line-height:1.5;">Ships pre-trained. Train continuously to keep improving it live — it never caps out.</p>
       </div>
+      <div id="tas-panel" style="padding:0.8rem;border-bottom:1px solid #1e1e2e;display:none;">
+        <p style="font-size:0.8rem;font-weight:600;color:#e2e8f0;margin-bottom:0.4rem;">Script — your swing-up</p>
+        <div style="display:flex;gap:0.35rem;margin-bottom:0.5rem;">
+          <button id="tas-play" class="btn btn-ghost" style="flex:1;font-size:0.75rem;padding:0.4rem;">▶ Play</button>
+          <button id="tas-reset" class="btn btn-ghost" style="flex:1;font-size:0.75rem;padding:0.4rem;">⏹ Reset</button>
+        </div>
+        <button id="tas-engage" class="btn btn-ghost" style="width:100%;font-size:0.75rem;padding:0.4rem;">⤓ Engage balance</button>
+        <div id="tas-catch" style="font-size:0.68rem;margin-top:0.45rem;line-height:1.4;"></div>
+        <label style="display:flex;align-items:center;gap:0.4rem;font-size:0.7rem;color:#94a3b8;margin-top:0.5rem;cursor:pointer;">
+          <input type="checkbox" id="tas-auto" style="accent-color:#06b6d4;"> auto-catch when catchable
+        </label>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin:0.7rem 0 0.35rem;">
+          <span style="font-size:0.72rem;color:#94a3b8;">Force steps</span>
+          <span id="tas-total" style="font-size:0.66rem;color:#475569;"></span>
+        </div>
+        <div id="tas-segs" style="display:flex;flex-direction:column;gap:0.3rem;"></div>
+        <button id="tas-add" class="btn btn-ghost" style="width:100%;font-size:0.72rem;padding:0.35rem;margin-top:0.4rem;">＋ Add step</button>
+        <p style="font-size:0.62rem;color:#475569;margin-top:0.5rem;line-height:1.4;">Open-loop: the motor force is exactly your script — no feedback until you catch. Same script, same start, same run.</p>
+      </div>
       <div style="padding:0.8rem;">
         <p style="font-size:0.8rem;font-weight:600;color:#e2e8f0;margin-bottom:0.4rem;">How it works</p>
         <div id="notes" style="font-size:0.7rem;color:#64748b;line-height:1.6;"></div>
@@ -110,6 +136,7 @@ function refreshCtrlOptions() {
 // Show/populate the target-equilibrium selector for the double; update labels.
 function onPlantChange() {
   refreshCtrlOptions()
+  state.tasScript = null // scripts are plant-specific (force range, dynamics) — reseed
   const isDouble = state.plantKey === 'double'
   document.getElementById('lbl-target').style.display = isDouble ? '' : 'none'
   const st = document.getElementById('sel-target')
@@ -127,6 +154,13 @@ function onPlantChange() {
 let plant, sim
 function buildController() {
   const c = CONTROLLERS[state.ctrlKey]
+  if (state.ctrlKey === 'tas') {
+    const ctrl = c.make(plant, {})
+    if (!state.tasScript) state.tasScript = TAS_SEEDS[plant.meta.name].map(s => ({ ...s }))
+    ctrl.setScript(state.tasScript)
+    ctrl.setAutoCatch(document.getElementById('tas-auto')?.checked || false)
+    return ctrl
+  }
   if (plant.meta.name === 'double') {
     if (state.ctrlKey === 'lqr') {
       // Maneuver supervisor: precomputed iLQR swing-up trajectories tracked with
@@ -143,7 +177,7 @@ function buildController() {
 // Where the pole starts: LQR modes drop from hanging (they genuinely swing up);
 // the neural double starts near its target (it's a balancer, not a maneuverer).
 function startState() {
-  if (state.ctrlKey === 'manual') return plant.initialState() // start at rest; you drive
+  if (state.ctrlKey === 'manual' || state.ctrlKey === 'tas') return plant.initialState() // start at rest (hanging); you script/drive
   if (plant.meta.name !== 'double') return plant.initialState()
   if (state.ctrlKey === 'lqr') return plant.initialState()    // hanging; supervisor swings up
   const eq = plant.fromVec(plant.meta.equilibria[state.targetEq].x)
@@ -159,10 +193,49 @@ function rebuild() {
   document.getElementById('reset').textContent =
     (plant.meta.name === 'double' && state.ctrlKey === 'neural') ? '↺ Reset near target' : '↺ Drop from hanging'
   document.getElementById('neural-panel').style.display = state.ctrlKey === 'neural' ? '' : 'none'
+  document.getElementById('tas-panel').style.display = state.ctrlKey === 'tas' ? '' : 'none'
+  // The target-equilibrium selector is meaningless for TAS (it catches whichever
+  // equilibrium you reach), so hide it there even on the double.
+  document.getElementById('lbl-target').style.display =
+    (plant.meta.name === 'double' && state.ctrlKey !== 'tas') ? '' : 'none'
   document.getElementById('sel-target').disabled = false // enabled for both LQR and (goal-conditioned) neural
   if (state.ctrlKey !== 'neural') stopTraining() // continuous training only makes sense for neural
+  if (state.ctrlKey === 'tas') renderTasSegs()
   refreshNotes()
   updateHint()
+}
+
+// --- TAS timeline editor ---
+function pushTasScript() {
+  if (state.ctrlKey === 'tas') currentController.setScript(state.tasScript)
+  const total = state.tasScript.reduce((s, seg) => s + (+seg.dur || 0), 0)
+  const el = document.getElementById('tas-total')
+  if (el) el.textContent = `${state.tasScript.length} steps · ${total.toFixed(2)} s`
+}
+function renderTasSegs() {
+  const box = document.getElementById('tas-segs')
+  const fMax = plant.PARAMS.forceMax
+  box.innerHTML = state.tasScript.map((seg, i) => `
+    <div style="display:flex;gap:0.3rem;align-items:center;">
+      <input type="number" data-i="${i}" data-k="force" value="${seg.force}" step="1" min="${-fMax}" max="${fMax}"
+        style="width:64px;background:#12121a;color:#e2e8f0;border:1px solid #1e1e2e;border-radius:5px;padding:0.2rem 0.3rem;font-size:0.72rem;">
+      <span style="color:#475569;font-size:0.66rem;">N ×</span>
+      <input type="number" data-i="${i}" data-k="dur" value="${seg.dur}" step="0.02" min="0.02"
+        style="width:54px;background:#12121a;color:#e2e8f0;border:1px solid #1e1e2e;border-radius:5px;padding:0.2rem 0.3rem;font-size:0.72rem;">
+      <span style="color:#475569;font-size:0.66rem;">s</span>
+      <button data-del="${i}" class="btn btn-ghost" style="margin-left:auto;font-size:0.7rem;padding:0.15rem 0.4rem;color:#94a3b8;">×</button>
+    </div>`).join('')
+  box.querySelectorAll('input').forEach(inp => {
+    inp.onchange = () => {
+      const i = +inp.dataset.i, k = inp.dataset.k
+      state.tasScript[i][k] = k === 'dur' ? Math.max(0.02, +inp.value || 0.02) : (+inp.value || 0)
+      pushTasScript()
+    }
+  })
+  box.querySelectorAll('[data-del]').forEach(btn => {
+    btn.onclick = () => { state.tasScript.splice(+btn.dataset.del, 1); renderTasSegs(); pushTasScript() }
+  })
+  pushTasScript()
 }
 
 // --- continuous neuroevolution (Web Worker), hot-swapped live ---
@@ -212,6 +285,19 @@ document.getElementById('shove-r').onclick = () => shove(1)
 document.getElementById('reset').onclick = () => sim.reset(startState())
 document.getElementById('retrain').onclick = toggleTraining
 document.getElementById('motor').onclick = () => { if (sim.armed) sim.disarm(); else sim.arm() }
+// TAS transport
+document.getElementById('tas-play').onclick = () => {
+  if (currentController.playing) currentController.pause()
+  else { if (currentController.balancing) sim.reset(startState()); currentController.play(sim.state); sim.arm() }
+}
+document.getElementById('tas-reset').onclick = () => sim.reset(startState())
+document.getElementById('tas-engage').onclick = () => currentController.engageBalance(sim.state)
+document.getElementById('tas-auto').onchange = (e) => currentController.setAutoCatch(e.target.checked)
+document.getElementById('tas-add').onclick = () => {
+  const last = state.tasScript[state.tasScript.length - 1]
+  state.tasScript.push(last ? { force: -last.force, dur: last.dur } : { force: plant.PARAMS.forceMax, dur: 0.3 })
+  renderTasSegs()
+}
 selPlant.onchange = () => { state.plantKey = selPlant.value; onPlantChange(); rebuild() }
 selCtrl.onchange = () => { state.ctrlKey = selCtrl.value; rebuild() }
 const selTarget = document.getElementById('sel-target')
@@ -264,6 +350,10 @@ function updateHint() {
     h.innerHTML = `<strong style="color:#e2e8f0;">← →</strong> hold to drive the cart · <strong style="color:#e2e8f0;">Space</strong> reset — balance it yourself`
     return
   }
+  if (state.ctrlKey === 'tas') {
+    h.innerHTML = `<strong style="color:#e2e8f0;">Script</strong> force steps → <strong style="color:#e2e8f0;">▶ Play</strong> → <strong style="color:#e2e8f0;">⤓ Engage</strong> when catchable · <strong style="color:#e2e8f0;">Space</strong> reset`
+    return
+  }
   h.innerHTML = state.realistic
     ? `<strong style="color:#e2e8f0;">Realistic:</strong> noisy encoders · EKF estimate (grey ghost) · actuator lag — watch it jitter`
     : `<strong style="color:#e2e8f0;">← →</strong> or click to shove · <strong style="color:#e2e8f0;">Space</strong> drop from hanging`
@@ -278,6 +368,9 @@ const MODE_STYLE = {
   descend: { bg: '#f59e0b18', color: '#f59e0b', label: '↓ Descending to hanging' },
   settle: { bg: '#33415518', color: '#94a3b8', label: '· Settling for launch' },
   manual: { bg: '#33415518', color: '#94a3b8', label: '○ Manual — you drive' },
+  'tas-play': { bg: '#f59e0b18', color: '#f59e0b', label: '▶ Playing script' },
+  'tas-coast': { bg: '#33415518', color: '#94a3b8', label: '· Coasting (script ended)' },
+  'tas-idle': { bg: '#33415518', color: '#94a3b8', label: '○ TAS — script ready' },
   init: { bg: '#33415518', color: '#94a3b8', label: '○ Idle' },
 }
 function fmtDeg(rad) { return (rad * 180 / Math.PI).toFixed(1) + '°' }
@@ -313,6 +406,7 @@ function updatePanel() {
     </div>`).join('')
 
   renderCtrlPanel()
+  if (state.ctrlKey === 'tas') updateTasReadout()
 
   // Motor / safety cutoff UI
   const motorBtn = document.getElementById('motor')
@@ -330,7 +424,7 @@ function updatePanel() {
 function renderCtrlPanel() {
   const info = currentController.info
   const panel = document.getElementById('ctrl-panel')
-  if (!info || info.type === 'neural') { panel.style.display = 'none'; return }
+  if (!info || info.type === 'neural' || info.type === 'tas') { panel.style.display = 'none'; return }
   panel.style.display = ''
   const title = document.getElementById('ctrl-title')
   const body = document.getElementById('ctrl-body')
@@ -370,6 +464,23 @@ function renderCtrlPanel() {
   }
 }
 
+// Live "catchable?" readout + transport label for the TAS panel.
+function updateTasReadout() {
+  const info = currentController.info
+  document.getElementById('tas-play').textContent = info.playing ? '⏸ Pause' : '▶ Play'
+  const el = document.getElementById('tas-catch')
+  if (info.balancing) {
+    el.innerHTML = `<span style="color:#22c55e;font-weight:600;">● Caught ${info.caughtLabel}</span>`
+    return
+  }
+  const ang = (info.angErr * 180 / Math.PI).toFixed(0)
+  const good = info.catchable
+  el.innerHTML = `Nearest: <span style="color:#e2e8f0;">${info.nearestLabel}</span> · ${ang}°, ${info.rateErr.toFixed(1)} rad/s<br>`
+    + (good
+      ? `<span style="color:#22c55e;font-weight:600;">✓ catchable — engage now</span>`
+      : `<span style="color:#64748b;">not catchable yet — get the links near an equilibrium, slow</span>`)
+}
+
 function refreshNotes() {
   const common = [
     ['Underactuated', 'the motor only pushes the cart; the pole is never driven directly. Uprighting it means pumping energy through the cart.'],
@@ -380,6 +491,7 @@ function refreshNotes() {
         ? 'a GOAL-CONDITIONED network (10→22→14→1, tanh): the target equilibrium is fed in as two inputs (±1 per link — up/down), so one network balances any of the four states — pick the target and it holds it. "Train continuously" keeps evolving it live (seeded from the current champion), hot-swapping in each improvement — it never caps out.'
         : 'a small network (5→12→8→1, tanh) maps [sinθ, cosθ, θ̇, x, ẋ] straight to motor force. No control law was written — it was evolved by neuroevolution (tournament selection + mutation, reusing the creatures engine), learning both swing-up and balance from a fitness score.',
       manual: 'no controller — you are the loop. Hold the arrow keys to push the cart and try to balance the pole yourself. Good for feeling how unstable it really is.',
+      tas: 'tool-assisted: you author a timeline of open-loop force steps and Play them back deterministically — the motor does exactly what you scripted, no feedback, so the same script always gives the same motion (like a tool-assisted speedrun). Hunt for a swing-up, then Engage balance (or tick auto-catch) to hand off to an LQR that catches the NEAREST equilibrium — but only if you brought the links close and slow; the readout tells you when it is catchable. Seeded with a pump that already works — edit it and find your own.',
     }[state.ctrlKey]],
   ]
   if (state.plantKey === 'double') {
@@ -422,5 +534,6 @@ window.__pendulumDebug = {
   get armed() { return sim.armed }, get tripped() { return sim.tripped }, get tripReason() { return sim.tripReason },
   disarm: () => sim.disarm(), arm: () => sim.arm(),
   get force() { return sim.force },
+  get controller() { return currentController }, get mode2() { return sim.mode },
 }
 requestAnimationFrame(loop)
